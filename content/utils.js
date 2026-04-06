@@ -5,6 +5,7 @@ const SCRIPT_SOURCE = (() => {
   if (url.includes('auth0.openai.com') || url.includes('auth.openai.com') || url.includes('accounts.openai.com')) return 'signup-page';
   if (url.includes('mail.qq.com')) return 'qq-mail';
   if (url.includes('mail.163.com')) return 'mail-163';
+  if (url.includes('inbucket.j2to.de')) return 'inbucket-mail';
   if (url.includes('duckduckgo.com/email/settings/autofill')) return 'duck-mail';
   if (url.includes('chatgpt.com')) return 'chatgpt';
   // VPS panel — detected dynamically since URL is configurable
@@ -328,7 +329,7 @@ async function humanPause(min = 250, max = 850) {
 
 // Auto-report ready on load
 // Skip ready signal from child iframes of mail pages to avoid overwriting the top frame's registration
-const _isMailChildFrame = (SCRIPT_SOURCE === 'qq-mail' || SCRIPT_SOURCE === 'mail-163') && window !== window.top;
+const _isMailChildFrame = (SCRIPT_SOURCE === 'qq-mail' || SCRIPT_SOURCE === 'mail-163' || SCRIPT_SOURCE === 'inbucket-mail') && window !== window.top;
 if (!_isMailChildFrame) {
   reportReady();
 }

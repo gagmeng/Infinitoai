@@ -301,6 +301,11 @@ header {
   padding-inline: 10px;
 }
 
+#btn-toggle-password {
+  min-width: 58px;
+  padding-inline: 10px;
+}
+
 .data-select {
   flex: 1;
   padding: 7px 10px;

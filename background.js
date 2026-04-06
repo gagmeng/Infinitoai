@@ -8,6 +8,8 @@ const STOP_ERROR_MESSAGE = 'Flow stopped by user.';
 const HUMAN_STEP_DELAY_MIN = 700;
 const HUMAN_STEP_DELAY_MAX = 2200;
 
+initializeSessionStorageAccess();
+
 // ============================================================
 // State Management (chrome.storage.session)
 // ============================================================
@@ -28,12 +30,27 @@ const DEFAULT_STATE = {
   tabRegistry: {},
   logs: [],
   vpsUrl: '',
+  customPassword: '',
   mailProvider: '163', // 'qq' or '163'
+  inbucketMailbox: '',
 };
 
 async function getState() {
   const state = await chrome.storage.session.get(null);
   return { ...DEFAULT_STATE, ...state };
+}
+
+async function initializeSessionStorageAccess() {
+  try {
+    if (chrome.storage?.session?.setAccessLevel) {
+      await chrome.storage.session.setAccessLevel({
+        accessLevel: 'TRUSTED_AND_UNTRUSTED_CONTEXTS',
+      });
+      console.log(LOG_PREFIX, 'Enabled storage.session for content scripts');
+    }
+  } catch (err) {
+    console.warn(LOG_PREFIX, 'Failed to enable storage.session for content scripts:', err?.message || err);
+  }
 }
 
 async function setState(updates) {
@@ -53,18 +70,35 @@ async function setEmailState(email) {
   broadcastDataUpdate({ email });
 }
 
+async function setPasswordState(password) {
+  await setState({ password });
+  broadcastDataUpdate({ password });
+}
+
 async function resetState() {
   console.log(LOG_PREFIX, 'Resetting all state');
   // Preserve settings and persistent data across resets
-  const prev = await chrome.storage.session.get(['seenCodes', 'accounts', 'tabRegistry', 'vpsUrl', 'mailProvider']);
+  const prev = await chrome.storage.session.get([
+    'seenCodes',
+    'seenInbucketMailIds',
+    'accounts',
+    'tabRegistry',
+    'vpsUrl',
+    'customPassword',
+    'mailProvider',
+    'inbucketMailbox',
+  ]);
   await chrome.storage.session.clear();
   await chrome.storage.session.set({
     ...DEFAULT_STATE,
     seenCodes: prev.seenCodes || [],
+    seenInbucketMailIds: prev.seenInbucketMailIds || [],
     accounts: prev.accounts || [],
     tabRegistry: prev.tabRegistry || {},
     vpsUrl: prev.vpsUrl || '',
+    customPassword: prev.customPassword || '',
     mailProvider: prev.mailProvider || '163',
+    inbucketMailbox: prev.inbucketMailbox || '',
   });
 }
 
@@ -481,7 +515,9 @@ async function handleMessage(message, sender) {
     case 'SAVE_SETTING': {
       const updates = {};
       if (message.payload.vpsUrl !== undefined) updates.vpsUrl = message.payload.vpsUrl;
+      if (message.payload.customPassword !== undefined) updates.customPassword = message.payload.customPassword;
       if (message.payload.mailProvider !== undefined) updates.mailProvider = message.payload.mailProvider;
+      if (message.payload.inbucketMailbox !== undefined) updates.inbucketMailbox = message.payload.inbucketMailbox;
       await setState(updates);
       return { ok: true };
     }
@@ -725,6 +761,7 @@ async function autoRunLoop(totalRuns) {
     const keepSettings = {
       vpsUrl: prevState.vpsUrl,
       mailProvider: prevState.mailProvider,
+      inbucketMailbox: prevState.inbucketMailbox,
       autoRunning: true,
     };
     await resetState();
@@ -881,16 +918,17 @@ async function executeStep3(state) {
     throw new Error('No email address. Paste email in Side Panel first.');
   }
 
-  // Generate a unique password for this account
-  const password = generatePassword();
-  await setState({ password });
+  const password = state.customPassword || generatePassword();
+  await setPasswordState(password);
 
   // Save account record
   const accounts = state.accounts || [];
   accounts.push({ email: state.email, password, createdAt: new Date().toISOString() });
   await setState({ accounts });
 
-  await addLog(`Step 3: Filling email ${state.email}, password generated (${password.length} chars)`);
+  await addLog(
+    `Step 3: Filling email ${state.email}, password ${state.customPassword ? 'customized' : 'generated'} (${password.length} chars)`
+  );
   await sendToContentScript('signup-page', {
     type: 'EXECUTE_STEP',
     step: 3,
@@ -908,18 +946,35 @@ function getMailConfig(state) {
   if (provider === '163') {
     return { source: 'mail-163', url: 'https://mail.163.com/js6/main.jsp?df=mail163_letter#module=mbox.ListModule%7C%7B%22fid%22%3A1%2C%22order%22%3A%22date%22%2C%22desc%22%3Atrue%7D', label: '163 Mail' };
   }
+  if (provider === 'inbucket') {
+    const mailbox = (state.inbucketMailbox || '').trim();
+    if (!mailbox) {
+      return { error: 'Inbucket mailbox name is empty.' };
+    }
+    return {
+      source: 'inbucket-mail',
+      url: `https://inbucket.j2to.de/m/${encodeURIComponent(mailbox)}/`,
+      label: `Inbucket Mailbox (${mailbox})`,
+      navigateOnReuse: true,
+    };
+  }
   return { source: 'qq-mail', url: 'https://wx.mail.qq.com/', label: 'QQ Mail' };
 }
 
 async function executeStep4(state) {
   const mail = getMailConfig(state);
+  if (mail.error) throw new Error(mail.error);
   await addLog(`Step 4: Opening ${mail.label}...`);
 
   // For mail tabs, only create if not alive — don't navigate (preserves login session)
   const alive = await isTabAlive(mail.source);
   if (alive) {
-    const tabId = await getTabId(mail.source);
-    await chrome.tabs.update(tabId, { active: true });
+    if (mail.navigateOnReuse) {
+      await reuseOrCreateTab(mail.source, mail.url);
+    } else {
+      const tabId = await getTabId(mail.source);
+      await chrome.tabs.update(tabId, { active: true });
+    }
   } else {
     await reuseOrCreateTab(mail.source, mail.url);
   }
@@ -930,8 +985,9 @@ async function executeStep4(state) {
     source: 'background',
     payload: {
       filterAfterTimestamp: state.flowStartTime || 0,
-      senderFilters: ['openai', 'noreply', 'verify', 'auth'],
+      senderFilters: ['openai', 'noreply', 'verify', 'auth', 'duckduckgo', 'forward'],
       subjectFilters: ['verify', 'verification', 'code', '验证', 'confirm'],
+      targetEmail: state.email,
       maxAttempts: 20,
       intervalMs: 3000,
     },
@@ -1010,12 +1066,17 @@ async function executeStep6(state) {
 
 async function executeStep7(state) {
   const mail = getMailConfig(state);
+  if (mail.error) throw new Error(mail.error);
   await addLog(`Step 7: Opening ${mail.label}...`);
 
   const alive = await isTabAlive(mail.source);
   if (alive) {
-    const tabId = await getTabId(mail.source);
-    await chrome.tabs.update(tabId, { active: true });
+    if (mail.navigateOnReuse) {
+      await reuseOrCreateTab(mail.source, mail.url);
+    } else {
+      const tabId = await getTabId(mail.source);
+      await chrome.tabs.update(tabId, { active: true });
+    }
   } else {
     await reuseOrCreateTab(mail.source, mail.url);
   }
@@ -1026,8 +1087,9 @@ async function executeStep7(state) {
     source: 'background',
     payload: {
       filterAfterTimestamp: state.lastEmailTimestamp || state.flowStartTime || 0,
-      senderFilters: ['openai', 'noreply', 'verify', 'auth', 'chatgpt'],
+      senderFilters: ['openai', 'noreply', 'verify', 'auth', 'chatgpt', 'duckduckgo', 'forward'],
       subjectFilters: ['verify', 'verification', 'code', '验证', 'confirm', 'login'],
+      targetEmail: state.email,
       maxAttempts: 20,
       intervalMs: 3000,
     },

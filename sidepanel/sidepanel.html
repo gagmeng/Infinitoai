@@ -53,13 +53,25 @@
         <select id="select-mail-provider" class="data-select">
           <option value="163">163 Mail (mail.163.com)</option>
           <option value="qq">QQ Mail (wx.mail.qq.com)</option>
+          <option value="inbucket">Inbucket (inbucket.j2to.de/m/&lt;mailbox&gt;/)</option>
         </select>
+      </div>
+      <div class="data-row" id="row-inbucket-mailbox" style="display:none;">
+        <span class="data-label">Mailbox</span>
+        <input type="text" id="input-inbucket-mailbox" class="data-input" placeholder="e.g. zju2001" />
       </div>
       <div class="data-row">
         <span class="data-label">Email</span>
         <div class="data-inline">
           <input type="text" id="input-email" class="data-input" placeholder="Paste DuckDuckGo email" />
           <button id="btn-fetch-email" class="btn btn-outline btn-sm" type="button">Auto</button>
+        </div>
+      </div>
+      <div class="data-row">
+        <span class="data-label">Password</span>
+        <div class="data-inline">
+          <input type="password" id="input-password" class="data-input" placeholder="Leave blank to auto-generate" />
+          <button id="btn-toggle-password" class="btn btn-outline btn-sm" type="button">Show</button>
         </div>
       </div>
       <div class="data-row">

@@ -14,7 +14,9 @@ const displayLocalhostUrl = document.getElementById('display-localhost-url');
 const displayStatus = document.getElementById('display-status');
 const statusBar = document.getElementById('status-bar');
 const inputEmail = document.getElementById('input-email');
+const inputPassword = document.getElementById('input-password');
 const btnFetchEmail = document.getElementById('btn-fetch-email');
+const btnTogglePassword = document.getElementById('btn-toggle-password');
 const btnStop = document.getElementById('btn-stop');
 const btnReset = document.getElementById('btn-reset');
 const stepsProgress = document.getElementById('steps-progress');
@@ -24,6 +26,8 @@ const autoContinueBar = document.getElementById('auto-continue-bar');
 const btnClearLog = document.getElementById('btn-clear-log');
 const inputVpsUrl = document.getElementById('input-vps-url');
 const selectMailProvider = document.getElementById('select-mail-provider');
+const rowInbucketMailbox = document.getElementById('row-inbucket-mailbox');
+const inputInbucketMailbox = document.getElementById('input-inbucket-mailbox');
 const inputRunCount = document.getElementById('input-run-count');
 
 // ============================================================
@@ -77,11 +81,15 @@ async function restoreState() {
     if (state.email) {
       inputEmail.value = state.email;
     }
+    syncPasswordField(state);
     if (state.vpsUrl) {
       inputVpsUrl.value = state.vpsUrl;
     }
     if (state.mailProvider) {
       selectMailProvider.value = state.mailProvider;
+    }
+    if (state.inbucketMailbox) {
+      inputInbucketMailbox.value = state.inbucketMailbox;
     }
 
     if (state.stepStatuses) {
@@ -98,9 +106,19 @@ async function restoreState() {
 
     updateStatusDisplay(state);
     updateProgressCounter();
+    updateMailProviderUI();
   } catch (err) {
     console.error('Failed to restore state:', err);
   }
+}
+
+function syncPasswordField(state) {
+  inputPassword.value = state.customPassword || state.password || '';
+}
+
+function updateMailProviderUI() {
+  const useInbucket = selectMailProvider.value === 'inbucket';
+  rowInbucketMailbox.style.display = useInbucket ? '' : 'none';
 }
 
 // ============================================================
@@ -262,6 +280,10 @@ async function fetchDuckEmail() {
   }
 }
 
+function syncPasswordToggleLabel() {
+  btnTogglePassword.textContent = inputPassword.type === 'password' ? 'Show' : 'Hide';
+}
+
 // ============================================================
 // Button Handlers
 // ============================================================
@@ -284,6 +306,11 @@ document.querySelectorAll('.step-btn').forEach(btn => {
 
 btnFetchEmail.addEventListener('click', async () => {
   await fetchDuckEmail().catch(() => {});
+});
+
+btnTogglePassword.addEventListener('click', () => {
+  inputPassword.type = inputPassword.type === 'password' ? 'text' : 'password';
+  syncPasswordToggleLabel();
 });
 
 btnStop.addEventListener('click', async () => {
@@ -355,10 +382,27 @@ inputVpsUrl.addEventListener('change', async () => {
   }
 });
 
+inputPassword.addEventListener('change', async () => {
+  await chrome.runtime.sendMessage({
+    type: 'SAVE_SETTING',
+    source: 'sidepanel',
+    payload: { customPassword: inputPassword.value },
+  });
+});
+
 selectMailProvider.addEventListener('change', async () => {
+  updateMailProviderUI();
   await chrome.runtime.sendMessage({
     type: 'SAVE_SETTING', source: 'sidepanel',
     payload: { mailProvider: selectMailProvider.value },
+  });
+});
+
+inputInbucketMailbox.addEventListener('change', async () => {
+  await chrome.runtime.sendMessage({
+    type: 'SAVE_SETTING',
+    source: 'sidepanel',
+    payload: { inbucketMailbox: inputInbucketMailbox.value.trim() },
   });
 });
 
@@ -381,6 +425,7 @@ chrome.runtime.onMessage.addListener((message) => {
       chrome.runtime.sendMessage({ type: 'GET_STATE', source: 'sidepanel' }).then(updateStatusDisplay);
       if (status === 'completed') {
         chrome.runtime.sendMessage({ type: 'GET_STATE', source: 'sidepanel' }).then(state => {
+          syncPasswordField(state);
           if (state.oauthUrl) {
             displayOauthUrl.textContent = state.oauthUrl;
             displayOauthUrl.classList.add('has-value');
@@ -414,6 +459,9 @@ chrome.runtime.onMessage.addListener((message) => {
     case 'DATA_UPDATED': {
       if (message.payload.email) {
         inputEmail.value = message.payload.email;
+      }
+      if (message.payload.password !== undefined) {
+        inputPassword.value = message.payload.password || '';
       }
       if (message.payload.oauthUrl) {
         displayOauthUrl.textContent = message.payload.oauthUrl;
@@ -490,5 +538,6 @@ btnTheme.addEventListener('click', () => {
 
 initTheme();
 restoreState().then(() => {
+  syncPasswordToggleLabel();
   updateButtonStates();
 });
