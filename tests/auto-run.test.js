@@ -37,6 +37,44 @@ test('auto run summary reports mixed success and failure correctly', () => {
     {
       phase: 'complete',
       message: '=== Auto run finished: 3 succeeded, 2 failed, 5 total ===',
+      toastMessage: '自动运行完成：成功 3 次，失败 2 次',
+    }
+  );
+});
+
+test('auto run stop summary keeps success and failure statistics', () => {
+  assert.deepEqual(
+    summarizeAutoRunResult({
+      totalRuns: 5,
+      successfulRuns: 2,
+      failedRuns: 1,
+      lastAttemptedRun: 4,
+      stopRequested: true,
+      handedOffToManual: false,
+    }),
+    {
+      phase: 'stopped',
+      message: '=== Stopped after 3/5 runs (2 succeeded, 1 failed) ===',
+      toastMessage: '自动运行已停止：成功 2 次，失败 1 次',
+    }
+  );
+});
+
+test('infinite auto run stop summary reports completed rounds before stop', () => {
+  assert.deepEqual(
+    summarizeAutoRunResult({
+      totalRuns: Number.POSITIVE_INFINITY,
+      successfulRuns: 4,
+      failedRuns: 2,
+      lastAttemptedRun: 7,
+      stopRequested: true,
+      handedOffToManual: false,
+      infiniteMode: true,
+    }),
+    {
+      phase: 'stopped',
+      message: '=== Infinite auto run stopped after 6 runs (4 succeeded, 2 failed) ===',
+      toastMessage: '无限自动运行已停止：成功 4 次，失败 2 次',
     }
   );
 });

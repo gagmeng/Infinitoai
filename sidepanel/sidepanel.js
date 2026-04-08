@@ -31,6 +31,7 @@ const inputInbucketHost = document.getElementById('input-inbucket-host');
 const rowInbucketMailbox = document.getElementById('row-inbucket-mailbox');
 const inputInbucketMailbox = document.getElementById('input-inbucket-mailbox');
 const inputRunCount = document.getElementById('input-run-count');
+const inputRunInfinite = document.getElementById('input-run-infinite');
 const DEFAULT_AUTO_RUN_COUNT = 1;
 
 // ============================================================
@@ -98,6 +99,7 @@ async function restoreState() {
       inputInbucketMailbox.value = state.inbucketMailbox;
     }
     inputRunCount.value = String(state.autoRunCount || DEFAULT_AUTO_RUN_COUNT);
+    inputRunInfinite.checked = Boolean(state.autoRunInfinite);
 
     if (state.stepStatuses) {
       for (const [step, status] of Object.entries(state.stepStatuses)) {
@@ -114,6 +116,7 @@ async function restoreState() {
     updateStatusDisplay(state);
     updateProgressCounter();
     updateMailProviderUI();
+    updateRunModeUI();
   } catch (err) {
     console.error('Failed to restore state:', err);
   }
@@ -127,6 +130,11 @@ function updateMailProviderUI() {
   const useInbucket = selectMailProvider.value === 'inbucket';
   rowInbucketHost.style.display = useInbucket ? '' : 'none';
   rowInbucketMailbox.style.display = useInbucket ? '' : 'none';
+}
+
+function updateRunModeUI() {
+  inputRunCount.disabled = btnAutoRun.disabled || inputRunInfinite.checked;
+  inputRunCount.title = inputRunInfinite.checked ? 'Ignored in infinite mode' : 'Number of runs';
 }
 
 // ============================================================
@@ -330,10 +338,17 @@ btnStop.addEventListener('click', async () => {
 // Auto Run
 btnAutoRun.addEventListener('click', async () => {
   const totalRuns = parseInt(inputRunCount.value) || 1;
+  const infiniteMode = inputRunInfinite.checked;
+  await chrome.runtime.sendMessage({
+    type: 'SAVE_SETTING',
+    source: 'sidepanel',
+    payload: { autoRunCount: totalRuns, autoRunInfinite: infiniteMode },
+  });
   btnAutoRun.disabled = true;
-  inputRunCount.disabled = true;
+  inputRunInfinite.disabled = true;
+  updateRunModeUI();
   btnAutoRun.innerHTML = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><path d="M12 6v6l4 2"/></svg> Running...';
-  await chrome.runtime.sendMessage({ type: 'AUTO_RUN', source: 'sidepanel', payload: { totalRuns } });
+  await chrome.runtime.sendMessage({ type: 'AUTO_RUN', source: 'sidepanel', payload: { totalRuns, infiniteMode } });
 });
 
 btnAutoContinue.addEventListener('click', async () => {
@@ -361,12 +376,13 @@ btnReset.addEventListener('click', async () => {
     document.querySelectorAll('.step-row').forEach(row => row.className = 'step-row');
     document.querySelectorAll('.step-status').forEach(el => el.textContent = '');
     btnAutoRun.disabled = false;
-    inputRunCount.disabled = false;
+    inputRunInfinite.disabled = false;
     btnAutoRun.innerHTML = '<svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><polygon points="5 3 19 12 5 21 5 3"/></svg> Auto';
     autoContinueBar.style.display = 'none';
     updateStopButtonState(false);
     updateButtonStates();
     updateProgressCounter();
+    updateRunModeUI();
   }
 });
 
@@ -420,6 +436,11 @@ inputInbucketHost.addEventListener('change', async () => {
 inputRunCount.addEventListener('input', async () => {
   const count = parseInt(inputRunCount.value, 10);
   await saveTopSetting({ autoRunCount: Number.isFinite(count) && count > 0 ? count : DEFAULT_AUTO_RUN_COUNT });
+});
+
+inputRunInfinite.addEventListener('change', async () => {
+  updateRunModeUI();
+  await saveTopSetting({ autoRunInfinite: inputRunInfinite.checked });
 });
 
 // ============================================================
@@ -491,8 +512,10 @@ chrome.runtime.onMessage.addListener((message) => {
     }
 
     case 'AUTO_RUN_STATUS': {
-      const { phase, currentRun, totalRuns } = message.payload;
-      const runLabel = totalRuns > 1 ? ` (${currentRun}/${totalRuns})` : '';
+      const { phase, currentRun, totalRuns, infiniteMode, summaryToast } = message.payload;
+      const runLabel = infiniteMode
+        ? ` (${currentRun}/∞)`
+        : totalRuns > 1 ? ` (${currentRun}/${totalRuns})` : '';
       switch (phase) {
         case 'waiting_email':
           autoContinueBar.style.display = 'flex';
@@ -505,17 +528,25 @@ chrome.runtime.onMessage.addListener((message) => {
           break;
         case 'complete':
           btnAutoRun.disabled = false;
-          inputRunCount.disabled = false;
+          inputRunInfinite.disabled = false;
           btnAutoRun.innerHTML = '<svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><polygon points="5 3 19 12 5 21 5 3"/></svg> Auto';
           autoContinueBar.style.display = 'none';
           updateStopButtonState(false);
+          updateRunModeUI();
+          if (summaryToast) {
+            showToast(summaryToast, 'success', 5000);
+          }
           break;
         case 'stopped':
           btnAutoRun.disabled = false;
-          inputRunCount.disabled = false;
+          inputRunInfinite.disabled = false;
           btnAutoRun.innerHTML = '<svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><polygon points="5 3 19 12 5 21 5 3"/></svg> Auto';
           autoContinueBar.style.display = 'none';
           updateStopButtonState(false);
+          updateRunModeUI();
+          if (summaryToast) {
+            showToast(summaryToast, 'warn', 5000);
+          }
           break;
       }
       break;
@@ -556,4 +587,5 @@ initTheme();
 restoreState().then(() => {
   syncPasswordToggleLabel();
   updateButtonStates();
+  updateRunModeUI();
 });

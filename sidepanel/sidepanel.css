@@ -185,6 +185,53 @@ header {
   gap: 4px;
 }
 
+.run-toggle {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 30px;
+  height: 30px;
+  padding: 0 8px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--bg-base);
+  color: var(--text-secondary);
+  cursor: pointer;
+  user-select: none;
+  transition: all var(--transition);
+}
+
+.run-toggle:hover {
+  border-color: var(--blue);
+  color: var(--blue);
+  background: var(--blue-soft);
+}
+
+.run-toggle input {
+  position: absolute;
+  opacity: 0;
+  pointer-events: none;
+}
+
+.run-toggle span {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 14px;
+  font-weight: 700;
+  line-height: 1;
+}
+
+.run-toggle:has(input:checked) {
+  border-color: var(--blue);
+  color: var(--blue);
+  background: var(--blue-soft);
+  box-shadow: 0 0 0 3px var(--blue-glow);
+}
+
+.run-toggle:has(input:disabled) {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
 .run-count-input {
   width: 42px;
   padding: 6px 4px;

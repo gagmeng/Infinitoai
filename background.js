@@ -665,7 +665,8 @@ async function handleMessage(message, sender) {
     case 'AUTO_RUN': {
       clearStopRequest();
       const totalRuns = message.payload?.totalRuns || 1;
-      autoRunLoop(totalRuns);  // fire-and-forget
+      const infiniteMode = sanitizeInfiniteAutoRun(message.payload?.infiniteMode);
+      autoRunLoop(totalRuns, infiniteMode);  // fire-and-forget
       return { ok: true };
     }
 
@@ -798,7 +799,12 @@ async function handOffPausedAutoRunToManual(step) {
 
   chrome.runtime.sendMessage({
     type: 'AUTO_RUN_STATUS',
-    payload: { phase: 'stopped', currentRun: autoRunCurrentRun, totalRuns: autoRunTotalRuns },
+    payload: {
+      phase: 'stopped',
+      currentRun: autoRunCurrentRun,
+      totalRuns: autoRunTotalRuns,
+      infiniteMode: autoRunInfinite,
+    },
   }).catch(() => {});
 
   return true;
@@ -869,7 +875,12 @@ async function requestStop() {
   await setState({ autoRunning: false });
   chrome.runtime.sendMessage({
     type: 'AUTO_RUN_STATUS',
-    payload: { phase: 'stopped', currentRun: autoRunCurrentRun, totalRuns: autoRunTotalRuns },
+    payload: {
+      phase: 'stopped',
+      currentRun: autoRunCurrentRun,
+      totalRuns: autoRunTotalRuns,
+      infiniteMode: autoRunInfinite,
+    },
   }).catch(() => {});
 }
 
@@ -965,9 +976,10 @@ async function fetchDuckEmail(options = {}) {
 let autoRunActive = false;
 let autoRunCurrentRun = 0;
 let autoRunTotalRuns = 1;
+let autoRunInfinite = false;
 
 // Outer loop: runs the full flow N times
-async function autoRunLoop(totalRuns) {
+async function autoRunLoop(totalRuns, infiniteMode = false) {
   if (autoRunActive) {
     await addLog('Auto run already in progress', 'warn');
     return;
@@ -975,13 +987,14 @@ async function autoRunLoop(totalRuns) {
 
   clearStopRequest();
   autoRunActive = true;
-  autoRunTotalRuns = totalRuns;
+  autoRunInfinite = Boolean(infiniteMode);
+  autoRunTotalRuns = autoRunInfinite ? Number.POSITIVE_INFINITY : totalRuns;
   await setState({ autoRunning: true });
   let handedOffToManual = false;
   let successfulRuns = 0;
   let failedRuns = 0;
 
-  for (let run = 1; run <= totalRuns; run++) {
+  for (let run = 1; autoRunInfinite || run <= totalRuns; run++) {
     autoRunCurrentRun = run;
 
     // Reset everything at the start of each run (keep VPS/mail settings)
@@ -991,6 +1004,8 @@ async function autoRunLoop(totalRuns) {
       mailProvider: prevState.mailProvider,
       inbucketHost: prevState.inbucketHost,
       inbucketMailbox: prevState.inbucketMailbox,
+      autoRunCount: sanitizeAutoRunCount(prevState.autoRunCount),
+      autoRunInfinite: sanitizeInfiniteAutoRun(prevState.autoRunInfinite),
       autoRunning: true,
     };
     await resetState();
@@ -999,8 +1014,12 @@ async function autoRunLoop(totalRuns) {
     chrome.runtime.sendMessage({ type: 'AUTO_RUN_RESET' }).catch(() => {});
     await sleepWithStop(500);
 
-    await addLog(`=== Auto Run ${run}/${totalRuns} — Phase 1: Get OAuth link & open signup ===`, 'info');
-    const status = (phase) => ({ type: 'AUTO_RUN_STATUS', payload: { phase, currentRun: run, totalRuns } });
+    const runTargetText = autoRunInfinite ? `${run}/∞` : `${run}/${totalRuns}`;
+    await addLog(`=== Auto Run ${runTargetText} — Phase 1: Get OAuth link & open signup ===`, 'info');
+    const status = (phase) => ({
+      type: 'AUTO_RUN_STATUS',
+      payload: { phase, currentRun: run, totalRuns: autoRunTotalRuns, infiniteMode: autoRunInfinite },
+    });
 
     try {
       throwIfStopped();
@@ -1012,14 +1031,14 @@ async function autoRunLoop(totalRuns) {
       let emailReady = false;
       try {
         const duckEmail = await fetchDuckEmail({ generateNew: true });
-        await addLog(`=== Run ${run}/${totalRuns} — Duck email ready: ${duckEmail} ===`, 'ok');
+        await addLog(`=== Run ${runTargetText} — Duck email ready: ${duckEmail} ===`, 'ok');
         emailReady = true;
       } catch (err) {
         await addLog(`Duck Mail auto-fetch failed: ${err.message}`, 'warn');
       }
 
       if (!emailReady) {
-        await addLog(`=== Run ${run}/${totalRuns} PAUSED: Fetch Duck email or paste manually, then continue ===`, 'warn');
+        await addLog(`=== Run ${runTargetText} PAUSED: Fetch Duck email or paste manually, then continue ===`, 'warn');
         chrome.runtime.sendMessage(status('waiting_email')).catch(() => {});
 
         // Wait for RESUME_AUTO_RUN — sets a promise that resumeAutoRun resolves
@@ -1032,7 +1051,7 @@ async function autoRunLoop(totalRuns) {
         }
       }
 
-      await addLog(`=== Run ${run}/${totalRuns} — Phase 2: Register, verify, login, complete ===`, 'info');
+      await addLog(`=== Run ${runTargetText} — Phase 2: Register, verify, login, complete ===`, 'info');
       chrome.runtime.sendMessage(status('running')).catch(() => {});
 
       const signupTabId = await getTabId('signup-page');
@@ -1045,22 +1064,22 @@ async function autoRunLoop(totalRuns) {
         executeStepAndWait,
       });
 
-      await addLog(`=== Run ${run}/${totalRuns} COMPLETE! ===`, 'ok');
+      await addLog(`=== Run ${runTargetText} COMPLETE! ===`, 'ok');
       successfulRuns++;
 
     } catch (err) {
       if (isAutoRunHandoffError(err)) {
         handedOffToManual = true;
-        await addLog(`Run ${run}/${totalRuns} handed off to manual continuation`, 'info');
+        await addLog(`Run ${runTargetText} handed off to manual continuation`, 'info');
         break;
       } else if (isStopError(err)) {
-        await addLog(`Run ${run}/${totalRuns} stopped by user`, 'warn');
+        await addLog(`Run ${runTargetText} stopped by user`, 'warn');
         break;
       } else {
         failedRuns++;
-        await addLog(`Run ${run}/${totalRuns} failed: ${err.message}`, 'error');
-        if (run < totalRuns) {
-          await addLog(`=== Run ${run}/${totalRuns} failed. Starting next run automatically... ===`, 'warn');
+        await addLog(`Run ${runTargetText} failed: ${err.message}`, 'error');
+        if (autoRunInfinite || run < totalRuns) {
+          await addLog(`=== Run ${runTargetText} failed. Starting next run automatically... ===`, 'warn');
           chrome.runtime.sendMessage(status('running')).catch(() => {});
           continue;
         }
@@ -1076,15 +1095,26 @@ async function autoRunLoop(totalRuns) {
     lastAttemptedRun,
     stopRequested,
     handedOffToManual,
+    infiniteMode: autoRunInfinite,
   });
 
   await addLog(summary.message, summary.phase === 'complete' ? 'ok' : 'warn');
   chrome.runtime.sendMessage({
     type: 'AUTO_RUN_STATUS',
-    payload: { phase: summary.phase, currentRun: lastAttemptedRun, totalRuns: autoRunTotalRuns },
+    payload: {
+      phase: summary.phase,
+      currentRun: lastAttemptedRun,
+      totalRuns: autoRunTotalRuns,
+      infiniteMode: autoRunInfinite,
+      summaryMessage: summary.message,
+      summaryToast: summary.toastMessage,
+      successfulRuns,
+      failedRuns,
+    },
   }).catch(() => {});
 
   autoRunActive = false;
+  autoRunInfinite = false;
   await setState({ autoRunning: false });
   clearStopRequest();
 }
