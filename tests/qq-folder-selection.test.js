@@ -47,6 +47,16 @@ function loadQqMailContext(elements) {
         return Date.now();
       },
     },
+    LatestMail: {
+      findLatestMatchingItem(items, predicate) {
+        for (const item of items) {
+          if (predicate(item)) {
+            return item;
+          }
+        }
+        return null;
+      },
+    },
     chrome: {
       runtime: {
         onMessage: { addListener() {} },
