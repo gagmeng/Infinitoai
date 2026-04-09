@@ -15,6 +15,8 @@ const displayStatus = document.getElementById('display-status');
 const statusBar = document.getElementById('status-bar');
 const inputEmail = document.getElementById('input-email');
 const inputPassword = document.getElementById('input-password');
+const btnCopyEmail = document.getElementById('btn-copy-email');
+const btnCopyPassword = document.getElementById('btn-copy-password');
 const btnFetchEmail = document.getElementById('btn-fetch-email');
 const btnTogglePassword = document.getElementById('btn-toggle-password');
 const btnStop = document.getElementById('btn-stop');
@@ -23,19 +25,80 @@ const stepsProgress = document.getElementById('steps-progress');
 const btnAutoRun = document.getElementById('btn-auto-run');
 const btnAutoContinue = document.getElementById('btn-auto-continue');
 const autoContinueBar = document.getElementById('auto-continue-bar');
+const autoContinueHint = document.getElementById('auto-continue-hint');
 const btnClearLog = document.getElementById('btn-clear-log');
 const inputVpsUrl = document.getElementById('input-vps-url');
 const displayRunSuccess = document.getElementById('display-run-success');
 const displayRunFailure = document.getElementById('display-run-failure');
 const selectMailProvider = document.getElementById('select-mail-provider');
+const selectEmailSource = document.getElementById('select-email-source');
+const row33MailSettings = document.getElementById('row-33mail-settings');
+const row33MailRotate = document.getElementById('row-33mail-rotate');
+const input33MailDomain163 = document.getElementById('input-33mail-domain-163');
+const input33MailDomainQq = document.getElementById('input-33mail-domain-qq');
+const inputAutoRotateMailProvider = document.getElementById('input-auto-rotate-mail-provider');
 const rowInbucketHost = document.getElementById('row-inbucket-host');
 const inputInbucketHost = document.getElementById('input-inbucket-host');
 const rowInbucketMailbox = document.getElementById('row-inbucket-mailbox');
 const inputInbucketMailbox = document.getElementById('input-inbucket-mailbox');
 const inputRunCount = document.getElementById('input-run-count');
 const inputRunInfinite = document.getElementById('input-run-infinite');
+const mailDomainGroups = [...document.querySelectorAll('.mail-domain-group')];
+const mailDomainInputs = {
+  '163': input33MailDomain163,
+  qq: input33MailDomainQq,
+};
 const DEFAULT_AUTO_RUN_COUNT = 1;
+const {
+  DEFAULT_EMAIL_SOURCE,
+  createDefault33MailDomainSettings,
+  normalize33MailDomainSettings,
+  sanitizeEmailSource,
+} = EmailAddresses;
 const { buildToastKey, canonicalizeToastMessage, getToastDuration } = ToastFeedback;
+let mailDomainSettingsState = createDefault33MailDomainSettings();
+
+const ACTION_ICONS = {
+  copy: `
+    <svg viewBox="0 0 24 24" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+      <rect x="9" y="9" width="11" height="11" rx="2"></rect>
+      <path d="M6 15H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h8a2 2 0 0 1 2 2v1"></path>
+    </svg>
+  `,
+  fetch: `
+    <svg viewBox="0 0 24 24" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+      <path d="M12 3v4"></path>
+      <path d="M12 17v4"></path>
+      <path d="M4.93 4.93l2.83 2.83"></path>
+      <path d="M16.24 16.24l2.83 2.83"></path>
+      <path d="M3 12h4"></path>
+      <path d="M17 12h4"></path>
+      <path d="M4.93 19.07l2.83-2.83"></path>
+      <path d="M16.24 7.76l2.83-2.83"></path>
+      <circle cx="12" cy="12" r="3"></circle>
+    </svg>
+  `,
+  busy: `
+    <svg viewBox="0 0 24 24" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+      <path d="M21 12a9 9 0 1 1-3.2-6.9"></path>
+      <path d="M21 3v6h-6"></path>
+    </svg>
+  `,
+  eye: `
+    <svg viewBox="0 0 24 24" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+      <path d="M2 12s3.5-6 10-6 10 6 10 6-3.5 6-10 6-10-6-10-6z"></path>
+      <circle cx="12" cy="12" r="3"></circle>
+    </svg>
+  `,
+  eyeOff: `
+    <svg viewBox="0 0 24 24" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+      <path d="M3 3l18 18"></path>
+      <path d="M10.6 10.6A3 3 0 0 0 14.4 14.4"></path>
+      <path d="M9.88 5.09A10.94 10.94 0 0 1 12 5c6.5 0 10 7 10 7a17.4 17.4 0 0 1-3.08 3.81"></path>
+      <path d="M6.61 6.61A17.33 17.33 0 0 0 2 12s3.5 7 10 7a10.94 10.94 0 0 0 5.39-1.61"></path>
+    </svg>
+  `,
+};
 
 // ============================================================
 // Toast Notifications
@@ -132,6 +195,9 @@ async function restoreState() {
     if (state.mailProvider) {
       selectMailProvider.value = state.mailProvider;
     }
+    selectEmailSource.value = sanitizeEmailSource(state.emailSource);
+    mailDomainSettingsState = normalize33MailDomainSettings(state.mailDomainSettings);
+    inputAutoRotateMailProvider.checked = Boolean(state.autoRotateMailProvider);
     if (state.inbucketHost) {
       inputInbucketHost.value = state.inbucketHost;
     }
@@ -157,6 +223,7 @@ async function restoreState() {
     updateStatusDisplay(state);
     updateProgressCounter();
     updateMailProviderUI();
+    updateEmailSourceUI();
     updateRunModeUI();
   } catch (err) {
     console.error('Failed to restore state:', err);
@@ -180,9 +247,101 @@ function updateMailProviderUI() {
   rowInbucketMailbox.style.display = useInbucket ? '' : 'none';
 }
 
+function getEmailSourceLabel() {
+  return selectEmailSource.value === '33mail' ? '33mail' : 'Duck';
+}
+
+function getCurrentProviderLabel() {
+  if (selectMailProvider.value === 'qq') return 'QQ';
+  if (selectMailProvider.value === 'inbucket') return 'Inbucket';
+  return '163';
+}
+
+function update33MailGroupUI() {
+  input33MailDomain163.value = mailDomainSettingsState['163']?.emailDomain || '';
+  input33MailDomainQq.value = mailDomainSettingsState.qq?.emailDomain || '';
+
+  mailDomainGroups.forEach((group) => {
+    const provider = group.dataset.provider;
+    group.classList.toggle('active', provider === selectMailProvider.value);
+  });
+}
+
+function updateEmailSourceUI() {
+  const emailSource = sanitizeEmailSource(selectEmailSource.value);
+  const is33Mail = emailSource === '33mail';
+  const currentProvider = selectMailProvider.value;
+  const isGroupedMailProvider = currentProvider === '163' || currentProvider === 'qq';
+
+  row33MailSettings.style.display = is33Mail ? '' : 'none';
+  row33MailRotate.style.display = is33Mail ? '' : 'none';
+  update33MailGroupUI();
+
+  inputEmail.placeholder = is33Mail
+    ? isGroupedMailProvider
+      ? 'Step 3 will generate a 33mail address automatically'
+      : '33mail uses the 163 / QQ groups'
+    : 'Paste DuckDuckGo email';
+  renderFetchButton(false);
+  autoContinueHint.textContent = is33Mail
+    ? inputAutoRotateMailProvider.checked
+      ? 'Auto mode will rotate the 163 / QQ 33mail groups by run'
+      : 'Select 163 or QQ, configure its domain, then continue'
+    : 'Use Auto to fetch Duck email, or paste manually, then continue';
+}
+
 function updateRunModeUI() {
   inputRunCount.disabled = btnAutoRun.disabled || inputRunInfinite.checked;
   inputRunCount.title = inputRunInfinite.checked ? 'Ignored in infinite mode' : 'Number of runs';
+}
+
+function renderFetchButton(isBusy = false) {
+  btnFetchEmail.innerHTML = isBusy ? ACTION_ICONS.busy : ACTION_ICONS.fetch;
+  btnFetchEmail.classList.toggle('is-busy', isBusy);
+  btnFetchEmail.title = isBusy
+    ? 'Generating or fetching email...'
+    : sanitizeEmailSource(selectEmailSource.value) === '33mail'
+      ? 'Generate email'
+      : 'Fetch email';
+  btnFetchEmail.setAttribute('aria-label', btnFetchEmail.title);
+}
+
+function renderPasswordToggleButton() {
+  const hidden = inputPassword.type === 'password';
+  btnTogglePassword.innerHTML = hidden ? ACTION_ICONS.eye : ACTION_ICONS.eyeOff;
+  btnTogglePassword.title = hidden ? 'Show password' : 'Hide password';
+  btnTogglePassword.setAttribute('aria-label', btnTogglePassword.title);
+}
+
+async function copyFieldValue(input, emptyMessage, successMessage) {
+  const value = input.value.trim();
+  if (!value) {
+    showToast(emptyMessage, 'warn', 2500);
+    return;
+  }
+
+  try {
+    await navigator.clipboard.writeText(value);
+    showToast(successMessage, 'success', 2200);
+  } catch (err) {
+    showToast(`Copy failed: ${err.message}`, 'error');
+  }
+}
+
+function renderStaticActionButtons() {
+  btnCopyEmail.innerHTML = ACTION_ICONS.copy;
+  btnCopyPassword.innerHTML = ACTION_ICONS.copy;
+}
+
+function formatAutoRunWaitUntil(waitUntilTimestamp) {
+  if (!Number.isFinite(waitUntilTimestamp)) return '';
+  const remainingMs = Math.max(0, waitUntilTimestamp - Date.now());
+  const totalSeconds = Math.max(1, Math.ceil(remainingMs / 1000));
+  const minutes = Math.floor(totalSeconds / 60);
+  const seconds = totalSeconds % 60;
+  if (minutes <= 0) return `${seconds}s`;
+  if (seconds === 0) return `${minutes}m`;
+  return `${minutes}m ${seconds}s`;
 }
 
 // ============================================================
@@ -313,14 +472,20 @@ function escapeHtml(text) {
   return div.innerHTML;
 }
 
-async function fetchDuckEmail() {
-  const defaultLabel = 'Auto';
+function setMailDomainForProvider(provider, value) {
+  mailDomainSettingsState = normalize33MailDomainSettings({
+    ...mailDomainSettingsState,
+    [provider]: { emailDomain: value },
+  });
+}
+
+async function fetchEmailAddress() {
   btnFetchEmail.disabled = true;
-  btnFetchEmail.textContent = '...';
+  renderFetchButton(true);
 
   try {
     const response = await chrome.runtime.sendMessage({
-      type: 'FETCH_DUCK_EMAIL',
+      type: 'FETCH_EMAIL_ADDRESS',
       source: 'sidepanel',
       payload: { generateNew: true },
     });
@@ -329,23 +494,37 @@ async function fetchDuckEmail() {
       throw new Error(response.error);
     }
     if (!response?.email) {
-      throw new Error('Duck email was not returned.');
+      throw new Error('Email address was not returned.');
     }
 
+    if (response.mailProvider) {
+      selectMailProvider.value = response.mailProvider;
+      updateMailProviderUI();
+      updateEmailSourceUI();
+    }
     inputEmail.value = response.email;
-    showToast(`Fetched ${response.email}`, 'success', 3500);
+    const providerLabel = response.mailProvider === 'qq'
+      ? 'QQ'
+      : response.mailProvider === '163'
+        ? '163'
+        : getCurrentProviderLabel();
+    showToast(
+      `${response.emailSource === '33mail' ? 'Generated' : 'Fetched'} ${response.email}${response.emailSource === '33mail' ? ` · ${providerLabel}` : ''}`,
+      'success',
+      3500
+    );
     return response.email;
   } catch (err) {
-    showToast(`Auto fetch failed: ${err.message}`, 'error');
+    showToast(`${getEmailSourceLabel()} failed: ${err.message}`, 'error');
     throw err;
   } finally {
     btnFetchEmail.disabled = false;
-    btnFetchEmail.textContent = defaultLabel;
+    renderFetchButton(false);
   }
 }
 
 function syncPasswordToggleLabel() {
-  btnTogglePassword.textContent = inputPassword.type === 'password' ? 'Show' : 'Hide';
+  renderPasswordToggleButton();
 }
 
 // ============================================================
@@ -357,11 +536,11 @@ document.querySelectorAll('.step-btn').forEach(btn => {
     const step = Number(btn.dataset.step);
     if (step === 3) {
       const email = inputEmail.value.trim();
-      if (!email) {
+      if (sanitizeEmailSource(selectEmailSource.value) !== '33mail' && !email) {
         showToast('Please paste email address or use Auto first', 'warn');
         return;
       }
-      await chrome.runtime.sendMessage({ type: 'EXECUTE_STEP', source: 'sidepanel', payload: { step, email } });
+      await chrome.runtime.sendMessage({ type: 'EXECUTE_STEP', source: 'sidepanel', payload: email ? { step, email } : { step } });
     } else {
       await chrome.runtime.sendMessage({ type: 'EXECUTE_STEP', source: 'sidepanel', payload: { step } });
     }
@@ -369,7 +548,15 @@ document.querySelectorAll('.step-btn').forEach(btn => {
 });
 
 btnFetchEmail.addEventListener('click', async () => {
-  await fetchDuckEmail().catch(() => {});
+  await fetchEmailAddress().catch(() => {});
+});
+
+btnCopyEmail.addEventListener('click', async () => {
+  await copyFieldValue(inputEmail, 'Email is empty', 'Email copied');
+});
+
+btnCopyPassword.addEventListener('click', async () => {
+  await copyFieldValue(inputPassword, 'Password is empty', 'Password copied');
 });
 
 btnTogglePassword.addEventListener('click', () => {
@@ -401,12 +588,12 @@ btnAutoRun.addEventListener('click', async () => {
 
 btnAutoContinue.addEventListener('click', async () => {
   const email = inputEmail.value.trim();
-  if (!email) {
-    showToast('Please fetch or paste DuckDuckGo email first!', 'warn');
+  if (sanitizeEmailSource(selectEmailSource.value) !== '33mail' && !email) {
+    showToast('Please fetch or paste an email address first!', 'warn');
     return;
   }
   autoContinueBar.style.display = 'none';
-  await chrome.runtime.sendMessage({ type: 'RESUME_AUTO_RUN', source: 'sidepanel', payload: { email } });
+  await chrome.runtime.sendMessage({ type: 'RESUME_AUTO_RUN', source: 'sidepanel', payload: email ? { email } : {} });
 });
 
 // Reset
@@ -470,7 +657,26 @@ inputPassword.addEventListener('change', async () => {
 
 selectMailProvider.addEventListener('change', async () => {
   updateMailProviderUI();
+  updateEmailSourceUI();
   await saveTopSetting({ mailProvider: selectMailProvider.value });
+});
+
+selectEmailSource.addEventListener('change', async () => {
+  updateEmailSourceUI();
+  await saveTopSetting({ emailSource: selectEmailSource.value });
+});
+
+Object.entries(mailDomainInputs).forEach(([provider, input]) => {
+  input.addEventListener('input', async () => {
+    setMailDomainForProvider(provider, input.value.trim());
+    updateEmailSourceUI();
+    await saveTopSetting({ mailDomainSettings: mailDomainSettingsState });
+  });
+});
+
+inputAutoRotateMailProvider.addEventListener('change', async () => {
+  updateEmailSourceUI();
+  await saveTopSetting({ autoRotateMailProvider: inputAutoRotateMailProvider.checked });
 });
 
 inputInbucketMailbox.addEventListener('change', async () => {
@@ -548,6 +754,11 @@ chrome.runtime.onMessage.addListener((message) => {
       if (message.payload.password !== undefined) {
         inputPassword.value = message.payload.password || '';
       }
+      if (message.payload.mailProvider) {
+        selectMailProvider.value = message.payload.mailProvider;
+        updateMailProviderUI();
+        updateEmailSourceUI();
+      }
       if (message.payload.oauthUrl) {
         displayOauthUrl.textContent = message.payload.oauthUrl;
         displayOauthUrl.classList.add('has-value');
@@ -560,7 +771,7 @@ chrome.runtime.onMessage.addListener((message) => {
     }
 
     case 'AUTO_RUN_STATUS': {
-      const { phase, currentRun, totalRuns, infiniteMode, summaryToast, successfulRuns, failedRuns } = message.payload;
+      const { phase, currentRun, totalRuns, infiniteMode, summaryToast, successfulRuns, failedRuns, waitUntilTimestamp } = message.payload;
       updateAutoRunStatsDisplay({ successfulRuns, failedRuns });
       const runLabel = infiniteMode
         ? ` (${currentRun}/∞)`
@@ -575,6 +786,15 @@ chrome.runtime.onMessage.addListener((message) => {
           btnAutoRun.innerHTML = `Running${runLabel}`;
           updateStopButtonState(true);
           break;
+        case 'waiting_rotation': {
+          const waitLabel = formatAutoRunWaitUntil(waitUntilTimestamp);
+          btnAutoRun.innerHTML = `Waiting${runLabel}`;
+          updateStopButtonState(true);
+          if (waitLabel) {
+            showToast(`33mail 两组都达到上限，约 ${waitLabel} 后自动继续`, 'warn', 7000);
+          }
+          break;
+        }
         case 'complete':
           btnAutoRun.disabled = false;
           inputRunInfinite.disabled = false;
@@ -633,6 +853,7 @@ btnTheme.addEventListener('click', () => {
 // ============================================================
 
 initTheme();
+renderStaticActionButtons();
 restoreState().then(() => {
   syncPasswordToggleLabel();
   updateButtonStates();
