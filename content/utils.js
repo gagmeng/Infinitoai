@@ -284,7 +284,6 @@ function reportComplete(step, data = {}) {
  */
 function reportError(step, errorMessage) {
   console.error(LOG_PREFIX, `Step ${step} failed: ${errorMessage}`);
-  log(`Step ${step} failed: ${errorMessage}`, 'error');
   chrome.runtime.sendMessage({
     type: 'STEP_ERROR',
     source: SCRIPT_SOURCE,

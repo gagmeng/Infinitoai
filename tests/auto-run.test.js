@@ -99,6 +99,35 @@ test('buildAutoRunStatusPayload always includes sanitized success and failure co
       failedRuns: 0,
       summaryMessage: '',
       summaryToast: '',
+      waitUntilTimestamp: null,
+      waitReason: '',
+    }
+  );
+});
+
+test('buildAutoRunStatusPayload keeps wait metadata for timed auto-run pauses', () => {
+  assert.deepEqual(
+    buildAutoRunStatusPayload({
+      phase: 'waiting_rotation',
+      currentRun: 8,
+      totalRuns: Number.POSITIVE_INFINITY,
+      infiniteMode: true,
+      successfulRuns: 6,
+      failedRuns: 1,
+      waitUntilTimestamp: 1710000000000,
+      waitReason: '33mail limit window',
+    }),
+    {
+      phase: 'waiting_rotation',
+      currentRun: 8,
+      totalRuns: Number.POSITIVE_INFINITY,
+      infiniteMode: true,
+      successfulRuns: 6,
+      failedRuns: 1,
+      summaryMessage: '',
+      summaryToast: '',
+      waitUntilTimestamp: 1710000000000,
+      waitReason: '33mail limit window',
     }
   );
 });

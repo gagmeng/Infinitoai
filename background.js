@@ -1,6 +1,6 @@
 // background.js — Service Worker: orchestration, state, tab management, message routing
 
-importScripts('data/names.js', 'shared/flow-runner.js', 'shared/runtime-errors.js', 'shared/auto-run.js', 'shared/duck-mail-errors.js', 'shared/sidepanel-settings.js', 'shared/tab-reclaim.js');
+importScripts('shared/email-addresses.js', 'shared/mail-provider-rotation.js', 'data/names.js', 'shared/flow-runner.js', 'shared/runtime-errors.js', 'shared/auto-run.js', 'shared/duck-mail-errors.js', 'shared/sidepanel-settings.js', 'shared/tab-reclaim.js');
 
 const LOG_PREFIX = '[MultiPage:bg]';
 const DUCK_AUTOFILL_URL = 'https://duckduckgo.com/email/settings/autofill';
@@ -9,16 +9,22 @@ const AUTO_RUN_HANDOFF_MESSAGE = 'Auto run handed off to manual continuation.';
 const HUMAN_STEP_DELAY_MIN = 700;
 const HUMAN_STEP_DELAY_MAX = 2200;
 const { runStepSequence } = FlowRunner;
-const { isMessageChannelClosedError } = RuntimeErrors;
+const { isMessageChannelClosedError, isReceivingEndMissingError, shouldSkipStepResultLog } = RuntimeErrors;
 const { buildAutoRunStatusPayload, shouldContinueAutoRunAfterError, summarizeAutoRunResult } = AutoRun;
 const { addDuckMailRetryHint } = DuckMailErrors;
+const { DEFAULT_EMAIL_SOURCE, generate33MailAddress, get33MailDomainForProvider, sanitizeEmailSource } = EmailAddresses;
+const { chooseMailProviderForAutoRun, getConfiguredRotatableMailProviders, getNextMailProviderAvailabilityTimestamp, isRotatableMailProvider, pruneMailProviderUsage, recordMailProviderUsage } = MailProviderRotation;
 const { buildReclaimableTabRegistry } = TabReclaim;
 const {
   DEFAULT_AUTO_RUN_COUNT,
   DEFAULT_AUTO_RUN_INFINITE,
+  DEFAULT_AUTO_ROTATE_MAIL_PROVIDER,
   PERSISTED_TOP_SETTING_KEYS,
+  DEFAULT_EMAIL_SOURCE: DEFAULT_PERSISTED_EMAIL_SOURCE,
   normalizePersistentSettings,
   sanitizeAutoRunCount,
+  sanitizeAutoRotateMailProvider,
+  sanitizeEmailSource: sanitizePersistedEmailSource,
   sanitizeInfiniteAutoRun,
 } = SidepanelSettings;
 
@@ -107,6 +113,10 @@ const DEFAULT_STATE = {
     successfulRuns: 0,
     failedRuns: 0,
   },
+  mailProviderUsage: {
+    '163': [],
+    qq: [],
+  },
 };
 
 async function getState() {
@@ -174,6 +184,15 @@ function broadcastDataUpdate(payload) {
   }).catch(() => {});
 }
 
+async function setMailProviderState(mailProvider) {
+  const nextProvider = isRotatableMailProvider(mailProvider) || mailProvider === 'inbucket'
+    ? mailProvider
+    : '163';
+  await setPersistentSettings({ mailProvider: nextProvider });
+  broadcastDataUpdate({ mailProvider: nextProvider });
+  return nextProvider;
+}
+
 async function setEmailState(email) {
   await setState({ email });
   broadcastDataUpdate({ email });
@@ -194,6 +213,7 @@ async function resetState() {
       'accounts',
       'tabRegistry',
       'autoRunStats',
+      'mailProviderUsage',
       'customPassword',
     ]),
     getPersistentSettings(),
@@ -207,6 +227,7 @@ async function resetState() {
     accounts: prev.accounts || [],
     tabRegistry: prev.tabRegistry || {},
     autoRunStats: prev.autoRunStats || DEFAULT_STATE.autoRunStats,
+    mailProviderUsage: pruneMailProviderUsage(prev.mailProviderUsage || DEFAULT_STATE.mailProviderUsage),
     customPassword: prev.customPassword || '',
   });
 }
@@ -652,6 +673,15 @@ async function humanStepDelay(min = HUMAN_STEP_DELAY_MIN, max = HUMAN_STEP_DELAY
   await sleepWithStop(duration);
 }
 
+function formatWaitDuration(waitMs) {
+  const totalSeconds = Math.max(1, Math.ceil(waitMs / 1000));
+  const minutes = Math.floor(totalSeconds / 60);
+  const seconds = totalSeconds % 60;
+  if (minutes <= 0) return `${seconds}s`;
+  if (seconds === 0) return `${minutes}m`;
+  return `${minutes}m ${seconds}s`;
+}
+
 async function clickWithDebugger(tabId, rect) {
   if (!tabId) {
     throw new Error('No auth tab found for debugger click.');
@@ -832,16 +862,22 @@ async function handleMessage(message, sender) {
       if (message.payload.vpsUrl !== undefined) persistentUpdates.vpsUrl = message.payload.vpsUrl;
       if (message.payload.customPassword !== undefined) sessionUpdates.customPassword = message.payload.customPassword;
       if (message.payload.mailProvider !== undefined) persistentUpdates.mailProvider = message.payload.mailProvider;
+      if (message.payload.emailSource !== undefined) persistentUpdates.emailSource = sanitizePersistedEmailSource(message.payload.emailSource);
+      if (message.payload.mailDomainSettings !== undefined) persistentUpdates.mailDomainSettings = message.payload.mailDomainSettings;
       if (message.payload.inbucketHost !== undefined) persistentUpdates.inbucketHost = message.payload.inbucketHost;
       if (message.payload.inbucketMailbox !== undefined) persistentUpdates.inbucketMailbox = message.payload.inbucketMailbox;
       if (message.payload.autoRunCount !== undefined) persistentUpdates.autoRunCount = sanitizeAutoRunCount(message.payload.autoRunCount);
       if (message.payload.autoRunInfinite !== undefined) persistentUpdates.autoRunInfinite = sanitizeInfiniteAutoRun(message.payload.autoRunInfinite);
+      if (message.payload.autoRotateMailProvider !== undefined) persistentUpdates.autoRotateMailProvider = sanitizeAutoRotateMailProvider(message.payload.autoRotateMailProvider);
 
       if (Object.keys(sessionUpdates).length > 0) {
         await setState(sessionUpdates);
       }
       if (Object.keys(persistentUpdates).length > 0) {
-        await setPersistentSettings(persistentUpdates);
+        const nextSettings = await setPersistentSettings(persistentUpdates);
+        if (persistentUpdates.mailProvider !== undefined) {
+          broadcastDataUpdate({ mailProvider: nextSettings.mailProvider });
+        }
       }
       return { ok: true };
     }
@@ -856,6 +892,18 @@ async function handleMessage(message, sender) {
       clearStopRequest();
       const email = await fetchDuckEmail(message.payload || {});
       return { ok: true, email };
+    }
+
+    case 'FETCH_EMAIL_ADDRESS': {
+      clearStopRequest();
+      const email = await fetchEmailAddress(message.payload || {});
+      const state = await getState();
+      return {
+        ok: true,
+        email,
+        emailSource: sanitizeEmailSource(state.emailSource),
+        mailProvider: state.mailProvider,
+      };
     }
 
     case 'STOP_FLOW': {
@@ -1072,13 +1120,19 @@ async function executeStep(step) {
         throw new Error(`Unknown step: ${step}`);
     }
   } catch (err) {
+    const latestState = await getState();
+    const currentStepStatus = latestState?.stepStatuses?.[step];
     if (isStopError(err)) {
-      await setStepStatus(step, 'stopped');
-      await addLog(`Step ${step} stopped by user`, 'warn');
+      if (!shouldSkipStepResultLog(currentStepStatus)) {
+        await setStepStatus(step, 'stopped');
+        await addLog(`Step ${step} stopped by user`, 'warn');
+      }
       throw err;
     }
-    await setStepStatus(step, 'failed');
-    await addLog(`Step ${step} failed: ${err.message}`, 'error');
+    if (!shouldSkipStepResultLog(currentStepStatus)) {
+      await setStepStatus(step, 'failed');
+      await addLog(`Step ${step} failed: ${err.message}`, 'error');
+    }
     throw err;
   }
 }
@@ -1124,6 +1178,60 @@ async function fetchDuckEmail(options = {}) {
   return result.email;
 }
 
+function getCurrentEmailSource(state) {
+  return sanitizeEmailSource(state?.emailSource ?? DEFAULT_PERSISTED_EMAIL_SOURCE ?? DEFAULT_EMAIL_SOURCE);
+}
+
+function getCurrentAutoRotateMailProvider(state) {
+  return sanitizeAutoRotateMailProvider(state?.autoRotateMailProvider ?? DEFAULT_AUTO_ROTATE_MAIL_PROVIDER);
+}
+
+function getEmailSourceLabel(emailSource) {
+  return emailSource === '33mail' ? '33mail' : 'Duck Mail';
+}
+
+function getEmailWaitHint(emailSource) {
+  return emailSource === '33mail'
+    ? 'Configure the 33mail domain or generate an email manually, then continue'
+    : 'Fetch Duck email or paste manually, then continue';
+}
+
+async function generate33MailEmail(options = {}) {
+  throwIfStopped();
+  const { generateNew = true } = options;
+  const state = await getState();
+  const configuredProviders = getConfiguredRotatableMailProviders(state.mailDomainSettings);
+  const preferredProvider = isRotatableMailProvider(state.mailProvider)
+    ? state.mailProvider
+    : '';
+  const currentProvider = preferredProvider || configuredProviders[0] || '163';
+  const currentDomain = get33MailDomainForProvider(state.mailDomainSettings, currentProvider);
+
+  if (!generateNew && state.email) {
+    return state.email;
+  }
+
+  if (currentProvider !== state.mailProvider) {
+    await setMailProviderState(currentProvider);
+  }
+
+  const email = generate33MailAddress(currentDomain);
+  const nextUsageState = recordMailProviderUsage(state.mailProviderUsage, currentProvider);
+  await setState({ mailProviderUsage: nextUsageState });
+  await setEmailState(email);
+  await addLog(`33mail: Generated ${email} for ${currentProvider}`, 'ok');
+  return email;
+}
+
+async function fetchEmailAddress(options = {}) {
+  const state = await getState();
+  const emailSource = getCurrentEmailSource(state);
+  if (emailSource === '33mail') {
+    return await generate33MailEmail(options);
+  }
+  return await fetchDuckEmail(options);
+}
+
 // ============================================================
 // Auto Run Flow
 // ============================================================
@@ -1134,6 +1242,7 @@ let autoRunTotalRuns = 1;
 let autoRunInfinite = false;
 let autoRunSuccessfulRuns = 0;
 let autoRunFailedRuns = 0;
+let autoRunLastRotatedMailProvider = null;
 
 // Outer loop: runs the full flow N times
 async function autoRunLoop(totalRuns, infiniteMode = false) {
@@ -1146,6 +1255,7 @@ async function autoRunLoop(totalRuns, infiniteMode = false) {
   autoRunActive = true;
   autoRunInfinite = Boolean(infiniteMode);
   autoRunTotalRuns = autoRunInfinite ? Number.POSITIVE_INFINITY : totalRuns;
+  autoRunLastRotatedMailProvider = null;
   await setAutoRunStats(0, 0);
   await setState({ autoRunning: true });
   let handedOffToManual = false;
@@ -1154,15 +1264,64 @@ async function autoRunLoop(totalRuns, infiniteMode = false) {
     autoRunCurrentRun = run;
 
     // Reset everything at the start of each run (keep VPS/mail settings)
-    const prevState = await getState();
+    let prevState = await getState();
+    let emailSource = getCurrentEmailSource(prevState);
+    let shouldRotateMailProvider = emailSource === '33mail' && getCurrentAutoRotateMailProvider(prevState);
+
+    while (shouldRotateMailProvider) {
+      const nextAvailableAt = getNextMailProviderAvailabilityTimestamp({
+        mailDomainSettings: prevState.mailDomainSettings,
+        usageState: prevState.mailProviderUsage,
+      });
+      if (!Number.isFinite(nextAvailableAt)) {
+        break;
+      }
+
+      const waitMs = Math.max(0, nextAvailableAt - Date.now());
+      if (waitMs <= 0) {
+        break;
+      }
+
+      await addLog(
+        `Auto run ${run}: all 33mail groups reached the 30-minute limit. Waiting ${formatWaitDuration(waitMs)} before retrying...`,
+        'warn'
+      );
+      sendAutoRunStatus('waiting_rotation', {
+        currentRun: run,
+        waitUntilTimestamp: nextAvailableAt,
+        waitReason: '33mail_limit_window',
+      });
+      await sleepWithStop(waitMs);
+
+      prevState = await getState();
+      emailSource = getCurrentEmailSource(prevState);
+      shouldRotateMailProvider = emailSource === '33mail' && getCurrentAutoRotateMailProvider(prevState);
+    }
+
+    let activeMailProvider = prevState.mailProvider;
+
+    if (shouldRotateMailProvider) {
+      activeMailProvider = chooseMailProviderForAutoRun({
+        autoRotateMailProvider: true,
+        currentProvider: prevState.mailProvider,
+        lastProvider: autoRunLastRotatedMailProvider,
+        mailDomainSettings: prevState.mailDomainSettings,
+        usageState: prevState.mailProviderUsage,
+      });
+      autoRunLastRotatedMailProvider = activeMailProvider;
+      await setMailProviderState(activeMailProvider);
+      await addLog(`Auto run ${run}: switched 33mail group to ${activeMailProvider.toUpperCase()}`, 'info');
+    }
+
     const keepSettings = {
       vpsUrl: prevState.vpsUrl,
-      mailProvider: prevState.mailProvider,
+      mailProvider: activeMailProvider,
       inbucketHost: prevState.inbucketHost,
       inbucketMailbox: prevState.inbucketMailbox,
       autoRunCount: sanitizeAutoRunCount(prevState.autoRunCount),
       autoRunInfinite: sanitizeInfiniteAutoRun(prevState.autoRunInfinite),
       autoRunStats: prevState.autoRunStats || { successfulRuns: autoRunSuccessfulRuns, failedRuns: autoRunFailedRuns },
+      mailProviderUsage: pruneMailProviderUsage(prevState.mailProviderUsage),
       autoRunning: true,
     };
     await resetState();
@@ -1181,24 +1340,26 @@ async function autoRunLoop(totalRuns, infiniteMode = false) {
       await executeStepAndWait(1, 2000);
       await executeStepAndWait(2, 2000);
 
+      const currentState = await getState();
+      const emailSource = getCurrentEmailSource(currentState);
       let emailReady = false;
       try {
-        const duckEmail = await fetchDuckEmail({ generateNew: true });
-        await addLog(`=== Run ${runTargetText} — Duck email ready: ${duckEmail} ===`, 'ok');
+        const nextEmail = await fetchEmailAddress({ generateNew: true });
+        await addLog(`=== Run ${runTargetText} — ${getEmailSourceLabel(emailSource)} ready: ${nextEmail} ===`, 'ok');
         emailReady = true;
       } catch (err) {
-        await addLog(`Duck Mail auto-fetch failed: ${err.message}`, 'warn');
+        await addLog(`${getEmailSourceLabel(emailSource)} auto-fetch failed: ${err.message}`, 'warn');
       }
 
       if (!emailReady) {
-        await addLog(`=== Run ${runTargetText} PAUSED: Fetch Duck email or paste manually, then continue ===`, 'warn');
+        await addLog(`=== Run ${runTargetText} PAUSED: ${getEmailWaitHint(emailSource)} ===`, 'warn');
         sendAutoRunStatus('waiting_email', { currentRun: run });
 
         // Wait for RESUME_AUTO_RUN — sets a promise that resumeAutoRun resolves
         await waitForResume();
 
         const resumedState = await getState();
-        if (!resumedState.email) {
+        if (getCurrentEmailSource(resumedState) !== '33mail' && !resumedState.email) {
           await addLog('Cannot resume: no email address.', 'error');
           break;
         }
@@ -1282,7 +1443,7 @@ function waitForResume() {
 async function resumeAutoRun() {
   throwIfStopped();
   const state = await getState();
-  if (!state.email) {
+  if (getCurrentEmailSource(state) !== '33mail' && !state.email) {
     await addLog('Cannot resume: no email address. Paste email in Side Panel first.', 'error');
     return;
   }
@@ -1338,7 +1499,20 @@ async function executeStep2(state) {
 // ============================================================
 
 async function executeStep3(state) {
-  if (!state.email) {
+  const emailSource = getCurrentEmailSource(state);
+  let email = state.email;
+
+  if (emailSource === '33mail') {
+    const currentDomain = get33MailDomainForProvider(state.mailDomainSettings, state.mailProvider || '163');
+    const normalizedEmail = String(email || '').trim().toLowerCase();
+    const matchesCurrentDomain = currentDomain && normalizedEmail.endsWith(`@${currentDomain}`);
+
+    if (!matchesCurrentDomain) {
+      email = await generate33MailEmail({ generateNew: true });
+    }
+  }
+
+  if (!email) {
     throw new Error('No email address. Paste email in Side Panel first.');
   }
 
@@ -1347,17 +1521,17 @@ async function executeStep3(state) {
 
   // Save account record
   const accounts = state.accounts || [];
-  accounts.push({ email: state.email, password, createdAt: new Date().toISOString() });
+  accounts.push({ email, password, createdAt: new Date().toISOString() });
   await setState({ accounts });
 
   await addLog(
-    `Step 3: Filling email ${state.email}, password ${state.customPassword ? 'customized' : 'generated'} (${password.length} chars)`
+    `Step 3: Filling email ${email}, password ${state.customPassword ? 'customized' : 'generated'} (${password.length} chars)`
   );
   await sendToContentScript('signup-page', {
     type: 'EXECUTE_STEP',
     step: 3,
     source: 'background',
-    payload: { email: state.email, password },
+    payload: { email, password },
   });
 }
 
@@ -1444,6 +1618,14 @@ async function ensureMailTabReady(mail) {
   });
 }
 
+async function reviveMailTab(mail) {
+  await reuseOrCreateTab(mail.source, mail.url, {
+    reloadIfSameUrl: true,
+    inject: mail.inject,
+    injectSource: mail.injectSource,
+  });
+}
+
 async function pollVerificationCodeFromMail(step, mail, payload) {
   let result;
 
@@ -1455,11 +1637,15 @@ async function pollVerificationCodeFromMail(step, mail, payload) {
       payload,
     });
   } catch (err) {
-    if (!isMessageChannelClosedError(err)) {
+    if (!isMessageChannelClosedError(err) && !isReceivingEndMissingError(err)) {
       throw err;
     }
 
-    await addLog(`Step ${step}: Mail page refreshed during polling. Retrying mailbox command once...`, 'warn');
+    await addLog(
+      `Step ${step}: Mail page connection was lost (${isReceivingEndMissingError(err) ? 'receiver missing' : 'message channel closed'}). Reloading mailbox and retrying once...`,
+      'warn'
+    );
+    await reviveMailTab(mail);
     await sleepWithStop(1200);
 
     result = await sendToContentScript(mail.source, {

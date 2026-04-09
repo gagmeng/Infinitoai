@@ -36,6 +36,8 @@
     failedRuns = 0,
     summaryMessage = '',
     summaryToast = '',
+    waitUntilTimestamp = null,
+    waitReason = '',
   }) {
     return {
       phase,
@@ -46,6 +48,8 @@
       failedRuns: sanitizeRunCounter(failedRuns),
       summaryMessage,
       summaryToast,
+      waitUntilTimestamp: Number.isFinite(waitUntilTimestamp) ? waitUntilTimestamp : null,
+      waitReason: typeof waitReason === 'string' ? waitReason : '',
     };
   }
 
