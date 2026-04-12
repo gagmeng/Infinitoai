@@ -69,6 +69,17 @@ async function step1_getOAuthLink() {
   let loginBtn = null;
 
   for (let attempt = 1; attempt <= maxCardLoadAttempts; attempt++) {
+    const bodyText = (document.querySelector('body')?.textContent || '').trim();
+    if (/502\s+bad\s+gateway/i.test(bodyText)) {
+      const state = await chrome.runtime.sendMessage({ type: 'GET_STATE' }).catch(() => null);
+      const fallbackUrl = String(state?.vpsUrl || '').trim();
+      if (fallbackUrl && fallbackUrl !== location.href) {
+        log('Step 1: VPS returned 502. Re-opening the configured OAuth page instead of refreshing the error page...', 'warn');
+        location.href = fallbackUrl;
+      }
+      throw new Error('VPS panel returned 502 Bad Gateway. Re-opened the configured OAuth page. If it still fails, switch node or VPS and retry.');
+    }
+
     log(`Step 1: Waiting for VPS panel to load (attempt ${attempt}/${maxCardLoadAttempts})...`);
 
     try {
@@ -175,25 +186,109 @@ async function step9_vpsVerify(payload) {
     }
   }
 
-  await humanPause(450, 1200);
-  simulateClick(submitBtn);
-  log('Step 9: Clicked "提交回调 URL", waiting for authentication result...');
+  const maxSubmitAttempts = 4;
+  for (let attempt = 1; attempt <= maxSubmitAttempts; attempt++) {
+    await humanPause(450, 1200);
+    fillInput(urlInput, localhostUrl);
+    simulateClick(submitBtn);
+    log(`Step 9: Clicked "提交回调 URL" (${attempt}/${maxSubmitAttempts}), waiting for authentication result...`);
 
-  // Wait for "认证成功！" status badge to appear
-  try {
-    await waitForElementByText('.status-badge, [class*="status"]', /认证成功/, 30000);
-    log('Step 9: Authentication successful!', 'ok');
-  } catch {
-    // Check if there's an error message instead
-    const statusEl = document.querySelector('.status-badge, [class*="status"]');
-    const statusText = statusEl ? statusEl.textContent : 'unknown';
-    if (/成功|success/i.test(statusText)) {
+    const outcome = await waitForStep9Outcome();
+    if (outcome.kind === 'success') {
       log('Step 9: Authentication successful!', 'ok');
-    } else {
-      log(`Step 9: Status after submit: "${statusText}". May still be processing.`, 'warn');
+      reportComplete(9);
+      return;
+    }
+
+    if (outcome.kind === 'transient_502') {
+      if (attempt < maxSubmitAttempts) {
+        log(`Step 9: VPS callback submit hit 502 (${outcome.detail}). Retrying submit...`, 'warn');
+        await sleep(1500);
+        continue;
+      }
+
+      throw new Error(
+        `VPS callback submit kept hitting 502 after ${maxSubmitAttempts} attempts (${outcome.detail}). ` +
+        'The account is usually already registered. Retry step 9 again first; if it still fails, continue from step 6 to re-authenticate instead of restarting from step 1.'
+      );
+    }
+
+    log(`Step 9: Status after submit: "${outcome.detail}". May still be processing.`, 'warn');
+    reportComplete(9);
+    return;
+  }
+
+  throw new Error('Step 9 ended unexpectedly before the VPS callback could be confirmed.');
+}
+
+function normalizeStep9StatusText(value) {
+  return String(value || '').replace(/\s+/g, ' ').trim();
+}
+
+function collectStep9StatusText() {
+  const selectors = [
+    '.status-badge',
+    '[class*="status"]',
+    '.alert',
+    '[role="alert"]',
+    '[class*="toast"]',
+    '[class*="message"]',
+    '[class*="notification"]',
+  ];
+  const parts = [];
+  const seen = new Set();
+
+  for (const selector of selectors) {
+    const elements = Array.from(document.querySelectorAll?.(selector) || []);
+    for (const element of elements) {
+      const text = normalizeStep9StatusText(element?.textContent || '');
+      if (!text || seen.has(text)) {
+        continue;
+      }
+      seen.add(text);
+      parts.push(text);
     }
   }
 
-  reportComplete(9);
+  const directStatus = document.querySelector('.status-badge, [class*="status"]');
+  const directText = normalizeStep9StatusText(directStatus?.textContent || '');
+  if (directText && !seen.has(directText)) {
+    seen.add(directText);
+    parts.push(directText);
+  }
+
+  const bodyText = normalizeStep9StatusText(document.querySelector('body')?.textContent || '');
+  if (bodyText && !seen.has(bodyText)) {
+    parts.push(bodyText);
+  }
+
+  return parts.join(' | ');
+}
+
+function detectStep9Transient502() {
+  const detail = collectStep9StatusText();
+  if (/502\s+bad\s+gateway|bad\s+gateway/i.test(detail)) {
+    return detail || '502 Bad Gateway';
+  }
+  return '';
+}
+
+async function waitForStep9Outcome(timeoutMs = 30000) {
+  try {
+    await waitForElementByText('.status-badge, [class*="status"]', /认证成功|成功|success/i, timeoutMs);
+    return { kind: 'success', detail: 'success' };
+  } catch {}
+
+  const transient502Detail = detectStep9Transient502();
+  if (transient502Detail) {
+    return { kind: 'transient_502', detail: transient502Detail };
+  }
+
+  const statusText = collectStep9StatusText() || 'unknown';
+  if (/认证成功|成功|success/i.test(statusText)) {
+    return { kind: 'success', detail: statusText };
+  }
+
+  return { kind: 'unknown', detail: statusText };
 }
 })();
