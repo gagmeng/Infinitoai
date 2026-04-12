@@ -300,7 +300,11 @@ function reportError(step, errorMessage) {
  */
 function simulateClick(el) {
   throwIfStopped();
-  el.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }));
+  if (typeof el?.click === 'function') {
+    el.click();
+  } else {
+    el.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }));
+  }
   console.log(LOG_PREFIX, `Clicked: ${el.tagName} ${el.textContent?.slice(0, 30) || ''}`);
   log(`Clicked [${el.tagName}] "${el.textContent?.trim().slice(0, 30) || ''}"`);
 }

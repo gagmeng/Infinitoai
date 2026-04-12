@@ -89,3 +89,28 @@ test('reportError emits step error without a duplicate LOG message', () => {
     ['STEP_ERROR']
   );
 });
+
+test('simulateClick prefers the element native click handler when available', () => {
+  const context = loadUtilsContext();
+  let nativeClickCalls = 0;
+  let dispatchedClickCalls = 0;
+
+  const button = {
+    tagName: 'BUTTON',
+    textContent: 'New Email',
+    click() {
+      nativeClickCalls += 1;
+    },
+    dispatchEvent(event) {
+      if (event?.type === 'click') {
+        dispatchedClickCalls += 1;
+      }
+      return true;
+    },
+  };
+
+  context.simulateClick(button);
+
+  assert.equal(nativeClickCalls, 1);
+  assert.equal(dispatchedClickCalls, 0);
+});
