@@ -15,12 +15,17 @@ const {
   isMessageChannelClosedError,
   isReceivingEndMissingError,
   shouldRetryStep3WithFreshOauth,
+  shouldRetryStep8WithFreshOauth,
   shouldSkipStepResultLog,
 } = RuntimeErrors;
 const {
+  DEFAULT_AUTO_RUN_LOG_SILENCE_TIMEOUT_MS,
+  buildAutoRunLogSilenceErrorMessage,
   buildAutoRunStatusPayload,
   buildAutoRunFailureRecord,
   formatAutoRunLabel,
+  isAutoRunLogSilenceError,
+  shouldContinueAutoRunAfterWatchdog,
   shouldContinueAutoRunAfterError,
   shouldStartNextInfiniteRunAfterManualFlow,
   summarizeAutoRunResult,
@@ -48,7 +53,12 @@ const {
   pollTmailorVerificationCode,
 } = TmailorApi;
 const { buildReclaimableTabRegistry, shouldPrepareSameUrlTabForReuse } = TabReclaim;
-const { getMailTabOpenUrlForStep, shouldNavigateMailTabOnStepStart } = FlowRecovery;
+const {
+  getMailTabOpenUrlForStep,
+  getStep6RecoveryReasonForUnexpectedAuthPage,
+  isLocalhostCallbackUrl,
+  shouldNavigateMailTabOnStepStart,
+} = FlowRecovery;
 const {
   DEFAULT_AUTO_RUN_COUNT,
   DEFAULT_AUTO_RUN_INFINITE,
@@ -179,6 +189,7 @@ const DEFAULT_STATE = {
 
 const TMAILOR_DOMAIN_STATE_KEY = 'tmailorDomainState';
 const AUTO_RUN_STATS_KEY = 'autoRunStats';
+const AUTO_RUN_LOG_SILENCE_TIMEOUT_MS = DEFAULT_AUTO_RUN_LOG_SILENCE_TIMEOUT_MS;
 let cachedTmailorDomainSeeds = null;
 let autoRunStatsLoaded = false;
 let autoRunStatsLoadPromise = null;
@@ -947,6 +958,7 @@ async function addLog(message, level = 'info') {
   await setState({ logs });
   // Broadcast to side panel
   chrome.runtime.sendMessage({ type: 'LOG_ENTRY', payload: entry }).catch(() => {});
+  touchAutoRunWatchdog(entry);
 }
 
 // ============================================================
@@ -1501,6 +1513,7 @@ async function handOffPausedAutoRunToManual(step) {
   const waiter = resumeWaiter;
   resumeWaiter = null;
   autoRunActive = false;
+  resetAutoRunWatchdog({ preserveLastLog: true });
 
   await setState({ autoRunning: false });
   await addLog(`Auto run handed off to manual continuation from step ${step}`, 'info');
@@ -1595,17 +1608,23 @@ async function markRunningStepsStopped() {
   }
 }
 
-async function requestStop() {
-  if (stopRequested) return;
+async function abortCurrentAutoRunRound(options = {}) {
+  const {
+    logMessage = '',
+    sendStoppedStatus = false,
+  } = options;
 
   stopRequested = true;
+  resetAutoRunWatchdog({ preserveLastLog: true });
   cancelPendingCommands();
   if (webNavListener) {
     chrome.webNavigation.onBeforeNavigate.removeListener(webNavListener);
     webNavListener = null;
   }
 
-  await addLog('Stop requested. Cancelling current operations...', 'warn');
+  if (logMessage) {
+    await addLog(logMessage, 'warn');
+  }
   await broadcastStopToContentScripts();
 
   for (const waiter of stepWaiters.values()) {
@@ -1621,7 +1640,18 @@ async function requestStop() {
   await markRunningStepsStopped();
   autoRunActive = false;
   await setState({ autoRunning: false });
-  sendAutoRunStatus('stopped');
+  if (sendStoppedStatus) {
+    sendAutoRunStatus('stopped');
+  }
+}
+
+async function requestStop() {
+  if (stopRequested) return;
+
+  await abortCurrentAutoRunRound({
+    logMessage: 'Stop requested. Cancelling current operations...',
+    sendStoppedStatus: true,
+  });
 }
 
 // ============================================================
@@ -1679,16 +1709,33 @@ async function executeStep(step) {
  * @param {number} step
  * @param {number} delayAfter - ms to wait after completion (for page transitions)
  */
-async function executeStepAndWait(step, delayAfter = 2000, recoveredStep3Timeout = false) {
+async function executeStepAndWait(step, delayAfter = 2000, recoveryState = false) {
   throwIfStopped();
-  const promise = waitForStepComplete(step, 120000);
-  try {
+  const recoveredStep3Timeout = recoveryState === true || Boolean(recoveryState?.step3Timeout);
+  const recoveredStep8UnexpectedRedirect = Boolean(recoveryState && recoveryState !== true && recoveryState.step8UnexpectedRedirect);
+  const completionPromise = waitForStepComplete(step, 120000);
+  const executionPromise = (async () => {
     await executeStep(step);
-    await promise;
+    await completionPromise;
+  })();
+  executionPromise.catch(() => {});
+  try {
+    const watchdogPromise = autoRunActive ? getAutoRunWatchdogPromise() : null;
+    if (watchdogPromise) {
+      await Promise.race([executionPromise, watchdogPromise]);
+    } else {
+      await executionPromise;
+    }
   } catch (err) {
     if (step === 3 && !recoveredStep3Timeout && shouldRetryStep3WithFreshOauth(err)) {
       await recoverStep3OauthTimeout();
-      return await executeStepAndWait(step, delayAfter, true);
+      return await executeStepAndWait(step, delayAfter, { step3Timeout: true });
+    }
+    if (step === 8 && !recoveredStep8UnexpectedRedirect && shouldRetryStep8WithFreshOauth(err)) {
+      await replaySteps6Through8WithCurrentAccount(
+        'Step 8: Auth flow did not reach localhost and instead landed on another page. Refreshing the VPS OAuth link and replaying steps 6-8 with the same account...'
+      );
+      return;
     }
     throw err;
   }
@@ -1935,6 +1982,14 @@ let autoRunTask = null;
 let manualHandoffRunContext = null;
 let autoRunCurrentRunStartedAt = 0;
 let autoRunCurrentSuccessMode = 'simulated';
+let autoRunWatchdogTimer = null;
+let autoRunWatchdogPromise = null;
+let autoRunWatchdogReject = null;
+let autoRunWatchdogGeneration = 0;
+let autoRunWatchdogSuspended = false;
+let autoRunWatchdogTriggered = false;
+let autoRunWatchdogLastActivityAt = 0;
+let autoRunWatchdogLastLogEntry = null;
 
 function resetAutoRunCurrentSuccessMode() {
   autoRunCurrentSuccessMode = 'simulated';
@@ -1946,9 +2001,127 @@ function markAutoRunCurrentSuccessMode(mode) {
   }
 }
 
+function clearAutoRunWatchdogTimer() {
+  if (autoRunWatchdogTimer) {
+    clearTimeout(autoRunWatchdogTimer);
+    autoRunWatchdogTimer = null;
+  }
+}
+
+function resetAutoRunWatchdog({ preserveLastLog = false } = {}) {
+  clearAutoRunWatchdogTimer();
+  autoRunWatchdogGeneration += 1;
+  autoRunWatchdogPromise = null;
+  autoRunWatchdogReject = null;
+  autoRunWatchdogSuspended = false;
+  autoRunWatchdogTriggered = false;
+  autoRunWatchdogLastActivityAt = 0;
+  if (!preserveLastLog) {
+    autoRunWatchdogLastLogEntry = null;
+  }
+}
+
+function ensureAutoRunWatchdogPromise() {
+  if (autoRunWatchdogPromise) {
+    return autoRunWatchdogPromise;
+  }
+
+  autoRunWatchdogPromise = new Promise((_, reject) => {
+    autoRunWatchdogReject = reject;
+  });
+  autoRunWatchdogPromise.catch(() => {});
+  return autoRunWatchdogPromise;
+}
+
+function scheduleAutoRunWatchdog() {
+  clearAutoRunWatchdogTimer();
+  if (!autoRunWatchdogPromise || autoRunWatchdogSuspended || autoRunWatchdogTriggered) {
+    return;
+  }
+
+  const generation = autoRunWatchdogGeneration;
+  autoRunWatchdogTimer = setTimeout(() => {
+    if (generation !== autoRunWatchdogGeneration || autoRunWatchdogSuspended || autoRunWatchdogTriggered) {
+      return;
+    }
+
+    const idleMs = Math.max(0, Date.now() - autoRunWatchdogLastActivityAt);
+    if (idleMs < AUTO_RUN_LOG_SILENCE_TIMEOUT_MS) {
+      scheduleAutoRunWatchdog();
+      return;
+    }
+
+    autoRunWatchdogTriggered = true;
+    clearAutoRunWatchdogTimer();
+    const error = new Error(buildAutoRunLogSilenceErrorMessage({
+      timeoutMs: AUTO_RUN_LOG_SILENCE_TIMEOUT_MS,
+      lastLogMessage: autoRunWatchdogLastLogEntry?.message || '',
+      lastLogLevel: autoRunWatchdogLastLogEntry?.level || '',
+      lastLogTimestamp: autoRunWatchdogLastLogEntry?.timestamp || 0,
+      now: Date.now(),
+    }));
+    if (autoRunWatchdogReject) {
+      autoRunWatchdogReject(error);
+      autoRunWatchdogReject = null;
+    }
+  }, AUTO_RUN_LOG_SILENCE_TIMEOUT_MS);
+}
+
+function startAutoRunWatchdog() {
+  resetAutoRunWatchdog();
+  ensureAutoRunWatchdogPromise();
+  autoRunWatchdogLastActivityAt = Date.now();
+  scheduleAutoRunWatchdog();
+}
+
+function suspendAutoRunWatchdog() {
+  if (!autoRunWatchdogPromise || autoRunWatchdogTriggered) {
+    return;
+  }
+
+  autoRunWatchdogSuspended = true;
+  clearAutoRunWatchdogTimer();
+}
+
+function resumeAutoRunWatchdog({ resetActivity = true } = {}) {
+  if (!autoRunWatchdogPromise || autoRunWatchdogTriggered) {
+    return;
+  }
+
+  autoRunWatchdogSuspended = false;
+  if (resetActivity) {
+    autoRunWatchdogLastActivityAt = Date.now();
+  }
+  scheduleAutoRunWatchdog();
+}
+
+function touchAutoRunWatchdog(entry = null) {
+  if (!autoRunWatchdogPromise || autoRunWatchdogTriggered) {
+    return;
+  }
+
+  autoRunWatchdogLastActivityAt = Number.isFinite(entry?.timestamp) ? entry.timestamp : Date.now();
+  if (entry && typeof entry.message === 'string' && entry.message.trim()) {
+    autoRunWatchdogLastLogEntry = {
+      message: entry.message,
+      level: entry.level || 'info',
+      timestamp: Number.isFinite(entry.timestamp) ? entry.timestamp : Date.now(),
+    };
+  }
+
+  if (!autoRunWatchdogSuspended) {
+    scheduleAutoRunWatchdog();
+  }
+}
+
+function getAutoRunWatchdogPromise() {
+  return autoRunWatchdogPromise;
+}
+
 async function recordVisibleAutoRunFailure(errorMessage, overrides = {}) {
   await ensureAutoRunStatsLoaded();
   const state = await getState();
+  const lastLogEntry = overrides.lastLogEntry || autoRunWatchdogLastLogEntry || null;
   const failureRecord = buildAutoRunFailureRecord({
     errorMessage,
     currentRun: overrides.currentRun ?? autoRunCurrentRun,
@@ -1958,6 +2131,8 @@ async function recordVisibleAutoRunFailure(errorMessage, overrides = {}) {
     currentRunStep: overrides.currentRunStep ?? state.currentRunStep ?? 0,
     currentStep: overrides.currentStep ?? state.currentStep ?? 0,
     currentEmail: overrides.currentEmail ?? state.email ?? '',
+    lastLogMessage: overrides.lastLogMessage ?? lastLogEntry?.message ?? '',
+    lastLogLevel: overrides.lastLogLevel ?? lastLogEntry?.level ?? '',
     timestamp: overrides.timestamp ?? Date.now(),
   });
 
@@ -1983,6 +2158,7 @@ function startAutoRunLoop(totalRuns, infiniteMode = false, options = {}) {
       await addLog(`Auto run crashed unexpectedly: ${err.message}`, 'error');
     })
     .finally(() => {
+      resetAutoRunWatchdog({ preserveLastLog: true });
       if (autoRunTask === task) {
         autoRunTask = null;
       }
@@ -2020,6 +2196,7 @@ async function autoRunLoop(totalRuns, infiniteMode = false, options = {}) {
   manualHandoffRunContext = null;
   autoRunCurrentRunStartedAt = 0;
   resetAutoRunCurrentSuccessMode();
+  startAutoRunWatchdog();
   await ensureAutoRunStatsLoaded();
   if (!preserveStats) {
     await setAutoRunStats(resetAutoRunFailureStats(autoRunStatsState));
@@ -2060,7 +2237,12 @@ async function autoRunLoop(totalRuns, infiniteMode = false, options = {}) {
         waitUntilTimestamp: nextAvailableAt,
         waitReason: '33mail_limit_window',
       });
-      await sleepWithStop(waitMs);
+      suspendAutoRunWatchdog();
+      try {
+        await sleepWithStop(waitMs);
+      } finally {
+        resumeAutoRunWatchdog({ resetActivity: true });
+      }
 
       prevState = await getState();
       emailSource = getCurrentEmailSource(prevState);
@@ -2128,7 +2310,12 @@ async function autoRunLoop(totalRuns, infiniteMode = false, options = {}) {
         sendAutoRunStatus('waiting_email', { currentRun: run });
 
         // Wait for RESUME_AUTO_RUN — sets a promise that resumeAutoRun resolves
-        await waitForResume();
+        suspendAutoRunWatchdog();
+        try {
+          await waitForResume();
+        } finally {
+          resumeAutoRunWatchdog({ resetActivity: true });
+        }
 
         const resumedState = await getState();
         if (getCurrentEmailSource(resumedState) !== '33mail' && !resumedState.email) {
@@ -2159,7 +2346,33 @@ async function autoRunLoop(totalRuns, infiniteMode = false, options = {}) {
       await setState({ currentRunStep: 0 });
 
     } catch (err) {
-      if (isAutoRunHandoffError(err)) {
+      if (isAutoRunLogSilenceError(err)) {
+        const failureRecord = await recordVisibleAutoRunFailure(err.message, {
+          currentRun: run,
+          totalRuns: autoRunTotalRuns,
+          infiniteMode: autoRunInfinite,
+        });
+        const shouldContinueAfterWatchdog = shouldContinueAutoRunAfterWatchdog({
+          currentRun: run,
+          totalRuns: autoRunTotalRuns,
+          infiniteMode: autoRunInfinite,
+        });
+        sessionFailedRuns += 1;
+        await addLog(failureRecord.logMessage, 'error');
+        await setState({ currentRunStep: 0 });
+        await abortCurrentAutoRunRound();
+        if (shouldContinueAfterWatchdog) {
+          clearStopRequest();
+          autoRunActive = true;
+          await setState({ autoRunning: true });
+          startAutoRunWatchdog();
+          await addLog(`=== Run ${runTargetText} watchdog timeout. Starting next run automatically... ===`, 'warn');
+          sendAutoRunStatus('running', { currentRun: run });
+          continue;
+        }
+        clearStopRequest();
+        break;
+      } else if (isAutoRunHandoffError(err)) {
         handedOffToManual = true;
         await addLog(`Run ${runTargetText} handed off to manual continuation`, 'info');
         break;
@@ -2224,6 +2437,7 @@ async function autoRunLoop(totalRuns, infiniteMode = false, options = {}) {
 
   autoRunActive = false;
   autoRunInfinite = false;
+  resetAutoRunWatchdog({ preserveLastLog: true });
   await setState({ autoRunning: false });
   clearStopRequest();
 }
@@ -2880,6 +3094,56 @@ async function executeStep7(state) {
   });
 }
 
+async function inspectSignupPageRecoveryState(expectedUrl) {
+  const signupTabId = await getTabId('signup-page');
+  if (!signupTabId) {
+    return {
+      reason: '',
+      url: '',
+      title: '',
+    };
+  }
+
+  try {
+    const tab = await chrome.tabs.get(signupTabId);
+    return {
+      reason: getStep6RecoveryReasonForUnexpectedAuthPage({
+        currentUrl: tab?.url,
+        currentPageText: tab?.title,
+        expectedUrl,
+      }),
+      url: tab?.url || '',
+      title: tab?.title || '',
+    };
+  } catch {
+    return {
+      reason: '',
+      url: '',
+      title: '',
+    };
+  }
+}
+
+function buildStep8RecoveryErrorMessage(reason, context = {}) {
+  const locationLabel = context.url || context.title || 'unknown page';
+  return `Step 8 recoverable: auth flow landed on an unexpected page before localhost redirect (${reason}). Refresh the VPS OAuth link and retry with the same email and password. Current page: ${locationLabel}`;
+}
+
+async function replaySteps6Through8WithCurrentAccount(logMessage, recoveryState = {}) {
+  await addLog(logMessage, 'warn');
+  await setState({ localhostUrl: null });
+  broadcastDataUpdate({ localhostUrl: null });
+
+  await executeStepAndWait(6, 2000);
+  await executeStepAndWait(7, 2000);
+  await executeStepAndWait(8, 1000, {
+    ...recoveryState,
+    step8UnexpectedRedirect: true,
+  });
+
+  return await getState();
+}
+
 // ============================================================
 // Step 8: Complete OAuth (auto click + localhost listener)
 // ============================================================
@@ -2889,6 +3153,11 @@ let webNavListener = null;
 async function executeStep8(state) {
   if (!state.oauthUrl) {
     throw new Error('No OAuth URL. Complete step 1 first.');
+  }
+
+  const preflightRecoveryState = await inspectSignupPageRecoveryState(state.oauthUrl);
+  if (preflightRecoveryState.reason === 'auth_server_error' || preflightRecoveryState.reason === 'unexpected_auth_redirect') {
+    throw new Error(buildStep8RecoveryErrorMessage(preflightRecoveryState.reason, preflightRecoveryState));
   }
 
   // Check if the signup tab already redirected to localhost before listener setup
@@ -2982,6 +3251,7 @@ async function executeStep8(state) {
           await addLog('Step 8: Debugger click dispatched, waiting for redirect...');
 
           // Fallback: poll tab URL in case webNavigation listeners missed the redirect
+          let unexpectedRedirectHits = 0;
           for (let i = 0; i < 30 && !resolved; i++) {
             await new Promise(r => setTimeout(r, 1000));
             try {
@@ -2989,6 +3259,19 @@ async function executeStep8(state) {
               if (isLocalhostUrl(tab.url)) {
                 captureLocalhostUrl(tab.url);
                 break;
+              }
+
+              const recoveryState = await inspectSignupPageRecoveryState(state.oauthUrl);
+              if (recoveryState.reason) {
+                unexpectedRedirectHits = recoveryState.reason === 'unexpected_auth_redirect'
+                  ? unexpectedRedirectHits + 1
+                  : 2;
+
+                if (unexpectedRedirectHits >= 2) {
+                  throw new Error(buildStep8RecoveryErrorMessage(recoveryState.reason, recoveryState));
+                }
+              } else if (tab.url && !isLocalhostCallbackUrl(tab.url)) {
+                unexpectedRedirectHits = 0;
               }
 
               const pageState = await getSignupAuthPageState();
@@ -2999,7 +3282,10 @@ async function executeStep8(state) {
                 throw new Error('Step 8 blocked: auth page still requires phone verification.');
               }
             } catch (err) {
-              if (err?.message === 'Step 8 blocked: auth page still requires phone verification.') {
+              if (
+                err?.message === 'Step 8 blocked: auth page still requires phone verification.'
+                || /^Step 8 (failed|blocked|recoverable):/i.test(err?.message || '')
+              ) {
                 throw err;
               }
               break;
@@ -3020,10 +3306,22 @@ async function executeStep8(state) {
 // ============================================================
 
 async function executeStep9(state) {
-  if (!state.localhostUrl) {
+  let effectiveState = state;
+
+  if (!effectiveState.localhostUrl) {
+    const recoveryState = await inspectSignupPageRecoveryState(effectiveState.oauthUrl);
+    if (recoveryState.reason) {
+      const detail = recoveryState.url || recoveryState.title || recoveryState.reason;
+      effectiveState = await replaySteps6Through8WithCurrentAccount(
+        `Step 9: Step 8 did not land on localhost and instead ended on ${detail}. Refreshing the VPS OAuth link and replaying steps 6-8 with the same account...`
+      );
+    }
+  }
+
+  if (!effectiveState.localhostUrl) {
     throw new Error('No localhost URL. Complete step 8 first.');
   }
-  if (!state.vpsUrl) {
+  if (!effectiveState.vpsUrl) {
     throw new Error('VPS URL not set. Please enter VPS URL in the side panel.');
   }
 
@@ -3035,7 +3333,7 @@ async function executeStep9(state) {
   if (!alive) {
     // Create new tab in the automation window
     const wid = await ensureAutomationWindowId();
-    const tab = await chrome.tabs.create({ url: state.vpsUrl, active: true, windowId: wid });
+    const tab = await chrome.tabs.create({ url: effectiveState.vpsUrl, active: true, windowId: wid });
     tabId = tab.id;
     await new Promise(resolve => {
       const listener = (tid, info) => {
@@ -3063,23 +3361,13 @@ async function executeStep9(state) {
     type: 'EXECUTE_STEP',
     step: 9,
     source: 'background',
-    payload: { localhostUrl: state.localhostUrl },
+    payload: { localhostUrl: effectiveState.localhostUrl },
   });
 
   if (response?.retryWithFreshOauth) {
-    await addLog(
-      `Step 9: VPS reported that the authorization link is no longer pending (${response.detail || response.reason || 'not pending'}). Refreshing OAuth and retrying steps 6-9 with the same account...`,
-      'warn'
+    const refreshedState = await replaySteps6Through8WithCurrentAccount(
+      `Step 9: VPS reported that the authorization link is no longer pending (${response.detail || response.reason || 'not pending'}). Refreshing OAuth and retrying steps 6-9 with the same account...`
     );
-
-    await setState({ localhostUrl: null });
-    broadcastDataUpdate({ localhostUrl: null });
-
-    await executeStepAndWait(6, 2000);
-    await executeStepAndWait(7, 2000);
-    await executeStepAndWait(8, 1000);
-
-    const refreshedState = await getState();
     const retryTabId = await getTabId('vps-panel') || tabId;
     const retryResponse = await chrome.tabs.sendMessage(retryTabId, {
       type: 'EXECUTE_STEP',
