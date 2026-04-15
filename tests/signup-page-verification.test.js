@@ -74,7 +74,7 @@ function createContext({
         return false;
       },
       getAuthOperationTimedOutMessage(step) {
-        return `Step ${step} blocked: OpenAI auth page timed out before credentials could be submitted. Refresh the VPS OAuth link and retry with the same email and password.`;
+        return `Step ${step} blocked: OpenAI auth page timed out before credentials could be submitted. Reopen the official signup page and retry with the same email and password.`;
       },
       isAuthFatalErrorText() {
         return false;
@@ -272,6 +272,48 @@ test('step 2 stops immediately and asks to change node when oauth page shows uns
   assert.deepEqual(context.__completions, []);
 });
 
+test('step 2 completes immediately when the official signup page is already showing the registration form', async () => {
+  const emailInput = {
+    getBoundingClientRect() {
+      return { width: 160, height: 40 };
+    },
+  };
+
+  const context = createContext({
+    href: 'https://auth.openai.com/create-account',
+    bodyText: 'Create your account',
+    querySelectorAllImpl(selector) {
+      if (selector === 'input[type="email"]') {
+        return [emailInput];
+      }
+      return [];
+    },
+  });
+  loadSignupPage(context);
+
+  const listener = context.__listeners[0];
+  assert.ok(listener, 'expected signup-page to register a runtime listener');
+
+  const response = await new Promise((resolve, reject) => {
+    const keepAlive = listener(
+      { type: 'EXECUTE_STEP', step: 2, payload: {} },
+      {},
+      (result) => resolve(result)
+    );
+    assert.equal(keepAlive, true);
+    setTimeout(() => reject(new Error('timeout waiting for response')), 2000);
+  });
+
+  assert.equal(response?.ok, true);
+  assert.deepEqual(context.__errors, []);
+  assert.deepEqual(context.__completions, [
+    {
+      step: 2,
+      payload: undefined,
+    },
+  ]);
+});
+
 test('step 3 reports an auth timeout page instead of a missing email field when the oauth session expired', async () => {
   const context = createContext({
     href: 'https://auth.openai.com/u/signup/identifier',
@@ -298,7 +340,7 @@ test('step 3 reports an auth timeout page instead of a missing email field when 
 
   assert.equal(
     response?.error,
-    'Step 3 blocked: OpenAI auth page timed out before credentials could be submitted. Refresh the VPS OAuth link and retry with the same email and password.'
+    'Step 3 blocked: OpenAI auth page timed out before credentials could be submitted. Reopen the official signup page and retry with the same email and password.'
   );
   assert.deepEqual(context.__completions, []);
   assert.deepEqual(context.__errors, [

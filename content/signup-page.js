@@ -77,6 +77,12 @@ async function step2_clickRegister() {
   log('Step 2: Looking for Register/Sign up button...');
   throwIfUnsupportedCountryRegionTerritoryBlocked(2);
 
+  if (isDirectSignupFormVisible()) {
+    log('Step 2: Official signup form is already visible. Continuing without clicking Register.', 'info');
+    reportComplete(2);
+    return;
+  }
+
   let registerBtn = null;
   try {
     registerBtn = await waitForElementByText(
@@ -106,6 +112,13 @@ function throwIfUnsupportedCountryRegionTerritoryBlocked(step, text = getVisible
   if (isUnsupportedCountryRegionTerritoryText(text)) {
     throw new Error(getUnsupportedCountryRegionTerritoryMessage(step));
   }
+}
+
+function isDirectSignupFormVisible() {
+  if (!/(create-account|\/u\/signup\/)/i.test(location.href)) {
+    return false;
+  }
+  return hasVisibleCredentialInput();
 }
 
 // ============================================================

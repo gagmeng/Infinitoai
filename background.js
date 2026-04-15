@@ -4,6 +4,7 @@ importScripts('shared/email-addresses.js', 'shared/mail-provider-rotation.js', '
 
 const LOG_PREFIX = '[Infinitoai:bg]';
 const DUCK_AUTOFILL_URL = 'https://duckduckgo.com/email/settings/autofill';
+const OFFICIAL_SIGNUP_ENTRY_URL = 'https://auth.openai.com/create-account';
 const STOP_ERROR_MESSAGE = 'Flow stopped by user.';
 const AUTO_RUN_HANDOFF_MESSAGE = 'Auto run handed off to manual continuation.';
 const HUMAN_STEP_DELAY_MIN = 700;
@@ -2316,13 +2317,12 @@ async function autoRunLoop(totalRuns, infiniteMode = false, options = {}) {
     const runStartedAt = Date.now();
     autoRunCurrentRunStartedAt = runStartedAt;
     resetAutoRunCurrentSuccessMode();
-    await addLog(`=== Auto Run ${runTargetText} — Phase 1: Get OAuth link & open signup ===`, 'info');
+      await addLog(`=== Auto Run ${runTargetText} — Phase 1: Open official signup ===`, 'info');
 
     try {
       throwIfStopped();
       sendAutoRunStatus('running', { currentRun: run });
 
-      await executeStepAndWait(1, 2000);
       await executeStepAndWait(2, 2000);
 
       const currentState = await getState();
@@ -2533,15 +2533,12 @@ async function executeStep1(state) {
 }
 
 // ============================================================
-// Step 2: Open Signup Page (Background opens tab, signup-page.js clicks Register)
+// Step 2: Open Signup Page (Background opens the official signup entry, signup-page.js continues if needed)
 // ============================================================
 
 async function executeStep2(state) {
-  if (!state.oauthUrl) {
-    throw new Error('No OAuth URL. Complete step 1 first.');
-  }
-  await addLog(`Step 2: Opening auth URL...`);
-  await reuseOrCreateTab('signup-page', state.oauthUrl);
+  await addLog(`Step 2: Opening official signup page...`);
+  await reuseOrCreateTab('signup-page', OFFICIAL_SIGNUP_ENTRY_URL);
 
   await sendToContentScript('signup-page', {
     type: 'EXECUTE_STEP',
@@ -3078,22 +3075,12 @@ async function refreshOauthUrlBeforeStep6(state, reason = 'Refreshing the VPS OA
 async function recoverStep3OauthTimeout() {
   const state = await getState();
   await addLog(
-    'Step 3: The signup auth page timed out before credentials could be submitted. Refreshing the VPS OAuth link and retrying once with the current email/password...',
+    'Step 3: The signup page timed out before credentials could be submitted. Reopening the official signup page and retrying once with the current email/password...',
     'warn'
   );
 
-  const refreshedState = await refreshOauthUrl(
-    state,
-    'Step 3',
-    'Refreshing the VPS OAuth link after the signup auth page timed out...'
-  );
-
-  if (!refreshedState.oauthUrl) {
-    throw new Error('No OAuth URL. Complete step 1 first.');
-  }
-
   const waitForSignupPage = waitForStepComplete(2, 120000);
-  await executeStep2(refreshedState);
+  await executeStep2(state);
   await waitForSignupPage;
 }
 
@@ -3110,7 +3097,7 @@ async function executeStep6(state) {
   );
 
   if (!effectiveState.oauthUrl) {
-    throw new Error('No OAuth URL. Complete step 1 first.');
+    throw new Error('No OAuth URL is available for login. Refresh the VPS OAuth link and retry step 6.');
   }
 
   await addLog(`Step 6: Opening OAuth URL for login...`);
@@ -3197,7 +3184,7 @@ let webNavListener = null;
 
 async function executeStep8(state) {
   if (!state.oauthUrl) {
-    throw new Error('No OAuth URL. Complete step 1 first.');
+    throw new Error('No OAuth URL. Complete step 6 first.');
   }
 
   const preflightRecoveryState = await inspectSignupPageRecoveryState(state.oauthUrl);
