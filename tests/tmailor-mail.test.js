@@ -559,6 +559,34 @@ test('tmailor can return the code directly when the mailbox is already on the em
   assert.equal(result.mailId, 'https://tmailor.com/inbox?emailid=7409508e-a0c4-4c26-8e80-41f92d283225');
 });
 
+test('tmailor can return the platform OpenAI code directly when the mailbox is already on the email detail page', async () => {
+  const context = createContext();
+  context.location.href = 'https://tmailor.com/inbox?emailid=platform-openai-detail';
+  context.MailMatching = require('../shared/mail-matching.js');
+  context.document.querySelector = (selector) => {
+    if (selector === 'h1') {
+      return { textContent: '你的 OpenAI 代码为 880264' };
+    }
+    if (selector === '#bodyCell') {
+      return { textContent: '你的 OpenAI 代码为 880264。请输入此验证码以继续登录。' };
+    }
+    return null;
+  };
+  loadTmailorScript(context);
+  const hooks = context.__MULTIPAGE_TMAILOR_TEST_HOOKS;
+  assert.ok(hooks?.readCodeFromCurrentDetailPage, 'expected tmailor test hooks to expose readCodeFromCurrentDetailPage');
+
+  const result = hooks.readCodeFromCurrentDetailPage(4, {
+    senderFilters: ['openai', 'noreply'],
+    subjectFilters: ['验证', 'code'],
+    targetEmail: 'abc123@mikrotikvn.com',
+  });
+
+  assert.equal(result.code, '880264');
+  assert.equal(result.emailTimestamp, 0);
+  assert.equal(result.mailId, 'https://tmailor.com/inbox?emailid=platform-openai-detail');
+});
+
 test('tmailor keeps waiting when the mail detail opens successfully but the verification code renders slowly', async () => {
   const context = createContext();
   const state = context.__state;

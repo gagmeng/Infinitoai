@@ -7,8 +7,9 @@
 
   root.MailMatching = exports;
 })(typeof globalThis !== 'undefined' ? globalThis : self, function() {
-  const REGISTRATION_CN_SUBJECT = /你的\s*chatgpt\s*代码为/i;
-  const VERIFICATION_EN_SUBJECT = /your\s*chatgpt\s*code\s*is/i;
+  const BRAND_PATTERN = '(?:chatgpt|openai)';
+  const REGISTRATION_CN_SUBJECT = new RegExp(`你的\\s*${BRAND_PATTERN}\\s*代码为`, 'i');
+  const VERIFICATION_EN_SUBJECT = new RegExp(`your\\s*${BRAND_PATTERN}\\s*code\\s*is`, 'i');
 
   const STEP_MAIL_MATCH_PROFILES = {
     4: {
