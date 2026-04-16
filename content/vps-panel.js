@@ -36,7 +36,7 @@ const { isVpsAuthorizationNotPendingText } = FlowRecovery;
 // Listen for commands from Background
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (message.type === 'EXECUTE_STEP') {
-    resetStopState();
+    resetStopState(message.controlSequence);
     handleStep(message.step, message.payload).then((result) => {
       sendResponse({ ok: true, ...(result || {}) });
     }).catch(err => {

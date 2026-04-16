@@ -1051,20 +1051,21 @@ async function findReusableActiveTabForSource(source, windowId) {
 // ============================================================
 
 async function sendToContentScript(source, message) {
+  const nextMessage = attachContentFlowControlSequence(message);
   const registry = await getTabRegistry();
   const entry = registry[source];
-  const queueTimeout = getContentScriptQueueTimeout(source, message?.type);
+  const queueTimeout = getContentScriptQueueTimeout(source, nextMessage?.type);
   const queueWaitHint = queueTimeout > 0
     ? `${Math.round(queueTimeout / 1000)}s timeout`
     : 'no timeout while waiting for manual takeover or challenge handling';
-  const responseTimeout = getContentScriptResponseTimeout(source, message?.type);
+  const responseTimeout = getContentScriptResponseTimeout(source, nextMessage?.type);
 
   if (!entry || !entry.ready) {
     console.log(LOG_PREFIX, `${source} not ready, queuing command`);
     if (source === 'tmailor-mail') {
-      const actionLabel = message?.type === 'FETCH_TMAILOR_EMAIL'
+      const actionLabel = nextMessage?.type === 'FETCH_TMAILOR_EMAIL'
         ? 'mailbox generation'
-        : message?.type === 'POLL_EMAIL'
+        : nextMessage?.type === 'POLL_EMAIL'
           ? 'inbox polling'
           : 'mailbox work';
       await addLog(
@@ -1072,7 +1073,7 @@ async function sendToContentScript(source, message) {
         'info'
       );
     }
-    return queueCommand(source, message, queueTimeout);
+    return queueCommand(source, nextMessage, queueTimeout);
   }
 
   // Verify tab is still alive
@@ -1086,12 +1087,12 @@ async function sendToContentScript(source, message) {
         'warn'
       );
     }
-    return queueCommand(source, message, queueTimeout);
+    return queueCommand(source, nextMessage, queueTimeout);
   }
 
-  console.log(LOG_PREFIX, `Sending to ${source} (tab ${entry.tabId}):`, message.type);
+  console.log(LOG_PREFIX, `Sending to ${source} (tab ${entry.tabId}):`, nextMessage.type);
   try {
-    return await sendContentScriptMessageWithTimeout(entry.tabId, source, message, responseTimeout);
+    return await sendContentScriptMessageWithTimeout(entry.tabId, source, nextMessage, responseTimeout);
   } catch (err) {
     const errorMessage = err?.message || String(err || '');
     const recoverableDisconnect =
@@ -1112,7 +1113,7 @@ async function sendToContentScript(source, message) {
 
     const alreadyLoaded = await prepareReclaimedTab(source, entry.tabId);
     if (alreadyLoaded) {
-      return await chrome.tabs.sendMessage(entry.tabId, message);
+      return await chrome.tabs.sendMessage(entry.tabId, nextMessage);
     }
 
     if (source === 'tmailor-mail') {
@@ -1123,7 +1124,7 @@ async function sendToContentScript(source, message) {
     }
     return queueCommandForReinjection({
       source,
-      message,
+      message: nextMessage,
       timeout: queueTimeout,
       queueCommand,
       reinject: async () => {
@@ -1349,20 +1350,41 @@ async function clickWithDebugger(tabId, rect, options = {}) {
 }
 
 async function broadcastStopToContentScripts() {
+  contentFlowControlSequence += 1;
+  const stopMessage = {
+    type: 'STOP_FLOW',
+    source: 'background',
+    payload: {},
+    controlSequence: contentFlowControlSequence,
+  };
   const registry = await getTabRegistry();
   for (const entry of Object.values(registry)) {
     if (!entry?.tabId) continue;
     try {
-      await chrome.tabs.sendMessage(entry.tabId, {
-        type: 'STOP_FLOW',
-        source: 'background',
-        payload: {},
-      });
+      await chrome.tabs.sendMessage(entry.tabId, stopMessage);
     } catch {}
   }
 }
 
 let stopRequested = false;
+let contentFlowControlSequence = 0;
+
+function attachContentFlowControlSequence(message = {}) {
+  if (!message || typeof message !== 'object') {
+    return message;
+  }
+
+  const existingSequence = Number.parseInt(String(message.controlSequence ?? '').trim(), 10);
+  if (Number.isFinite(existingSequence) && existingSequence > 0) {
+    return message;
+  }
+
+  contentFlowControlSequence += 1;
+  return {
+    ...message,
+    controlSequence: contentFlowControlSequence,
+  };
+}
 
 // ============================================================
 // Message Handler (central router)

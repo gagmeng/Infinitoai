@@ -150,3 +150,27 @@ test('simulateClick prefers the element native click handler when available', ()
   assert.equal(nativeClickCalls, 1);
   assert.equal(dispatchedClickCalls, 0);
 });
+
+test('resetStopState does not clear a newer stop request than the current command', () => {
+  const context = loadUtilsContext();
+  const stopListener = context.__listeners[0];
+  assert.equal(typeof stopListener, 'function');
+
+  stopListener({ type: 'STOP_FLOW', controlSequence: 9 });
+  context.resetStopState(7);
+
+  assert.equal(context.__MULTIPAGE_UTILS_STATE.flowStopped, true);
+  assert.throws(() => context.throwIfStopped(), /Flow stopped by user\./);
+});
+
+test('resetStopState clears an older stop request when a newer command starts', () => {
+  const context = loadUtilsContext();
+  const stopListener = context.__listeners[0];
+  assert.equal(typeof stopListener, 'function');
+
+  stopListener({ type: 'STOP_FLOW', controlSequence: 4 });
+  context.resetStopState(8);
+
+  assert.equal(context.__MULTIPAGE_UTILS_STATE.flowStopped, false);
+  assert.doesNotThrow(() => context.throwIfStopped());
+});

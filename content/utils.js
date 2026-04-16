@@ -2,6 +2,8 @@
 
 var __MULTIPAGE_UTILS_STATE = globalThis.__MULTIPAGE_UTILS_STATE || (globalThis.__MULTIPAGE_UTILS_STATE = {
   flowStopped: false,
+  latestControlSequence: 0,
+  latestStopSequence: 0,
   stopListenerRegistered: false,
   readyReported: false,
 });
@@ -22,9 +24,19 @@ var SCRIPT_SOURCE = (() => {
 var LOG_PREFIX = `[Infinitoai:${SCRIPT_SOURCE}]`;
 var STOP_ERROR_MESSAGE = 'Flow stopped by user.';
 
+function normalizeControlSequence(value) {
+  const parsed = Number.parseInt(String(value ?? '').trim(), 10);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : 0;
+}
+
 if (!__MULTIPAGE_UTILS_STATE.stopListenerRegistered) {
   chrome.runtime.onMessage.addListener((message) => {
     if (message.type === 'STOP_FLOW') {
+      const controlSequence = normalizeControlSequence(message.controlSequence);
+      if (controlSequence > 0) {
+        __MULTIPAGE_UTILS_STATE.latestControlSequence = Math.max(__MULTIPAGE_UTILS_STATE.latestControlSequence, controlSequence);
+        __MULTIPAGE_UTILS_STATE.latestStopSequence = Math.max(__MULTIPAGE_UTILS_STATE.latestStopSequence, controlSequence);
+      }
       __MULTIPAGE_UTILS_STATE.flowStopped = true;
       console.warn(LOG_PREFIX, STOP_ERROR_MESSAGE);
     }
@@ -32,7 +44,17 @@ if (!__MULTIPAGE_UTILS_STATE.stopListenerRegistered) {
   __MULTIPAGE_UTILS_STATE.stopListenerRegistered = true;
 }
 
-function resetStopState() {
+function resetStopState(controlSequence = 0) {
+  const normalizedControlSequence = normalizeControlSequence(controlSequence);
+  if (normalizedControlSequence > 0) {
+    __MULTIPAGE_UTILS_STATE.latestControlSequence = Math.max(
+      __MULTIPAGE_UTILS_STATE.latestControlSequence,
+      normalizedControlSequence
+    );
+    if (normalizedControlSequence <= __MULTIPAGE_UTILS_STATE.latestStopSequence) {
+      return;
+    }
+  }
   __MULTIPAGE_UTILS_STATE.flowStopped = false;
 }
 

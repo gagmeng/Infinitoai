@@ -30,7 +30,7 @@ log(`TMailor content script loaded on ${location.href}. Waiting for mailbox comm
 
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (message.type === 'FETCH_TMAILOR_EMAIL') {
-    resetStopState();
+    resetStopState(message.controlSequence);
     fetchTmailorEmail(message.payload).then(sendResponse).catch((err) => {
       if (isStopError(err)) {
         log('TMailor: Stopped by user.', 'warn');
@@ -43,7 +43,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   }
 
   if (message.type === 'POLL_EMAIL') {
-    resetStopState();
+    resetStopState(message.controlSequence);
     handlePollEmail(message.step, message.payload).then(sendResponse).catch((err) => {
       if (isStopError(err)) {
         log(`Step ${message.step}: Stopped by user.`, 'warn');

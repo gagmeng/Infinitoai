@@ -50,7 +50,7 @@ loadSeenMailIds();
 
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (message.type === 'POLL_EMAIL') {
-    resetStopState();
+    resetStopState(message.controlSequence);
     handlePollEmail(message.step, message.payload).then(result => {
       sendResponse(result);
     }).catch(err => {

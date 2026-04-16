@@ -12,7 +12,7 @@ console.log('[Infinitoai:duck-mail] Content script loaded on', location.href);
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (message.type !== 'FETCH_DUCK_EMAIL') return;
 
-  resetStopState();
+  resetStopState(message.controlSequence);
   fetchDuckEmail(message.payload).then(result => {
     sendResponse(result);
   }).catch(err => {

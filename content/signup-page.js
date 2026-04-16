@@ -23,7 +23,7 @@ const { getUnsupportedEmailBlockedMessage, isUnsupportedEmailBlockingStep, isUns
 // Listen for commands from Background
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (message.type === 'EXECUTE_STEP' || message.type === 'FILL_CODE' || message.type === 'STEP8_FIND_AND_CLICK' || message.type === 'CLICK_RESEND_EMAIL' || message.type === 'CHECK_AUTH_PAGE_STATE') {
-    resetStopState();
+    resetStopState(message.controlSequence);
     handleCommand(message).then((result) => {
       sendResponse({ ok: true, ...(result || {}) });
     }).catch(err => {
