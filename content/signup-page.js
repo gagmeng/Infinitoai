@@ -90,6 +90,7 @@ const CREDENTIAL_INPUT_SELECTORS = [
 const CREDENTIAL_INPUT_SELECTOR = CREDENTIAL_INPUT_SELECTORS.join(', ');
 const PLATFORM_LOGIN_ENTRY_URL = 'https://platform.openai.com/login';
 const AUTH_LOGIN_HOME_URL = 'https://auth.openai.com/log-in';
+const PLATFORM_SIGNING_BRIDGE_ISSUE_TIMEOUT_MS = 45000;
 
 async function step2_clickRegister() {
   log('Step 2: Looking for Register/Sign up button...');
@@ -196,6 +197,12 @@ function isPlatformSigningInStateText(text = getVisiblePageText()) {
   return /signing in/i.test(String(text || ''));
 }
 
+function isPlatformSigningBridgeState(text = getVisiblePageText()) {
+  return isPlatformHomeRedirectPage()
+    || isPlatformAuthCallbackPage()
+    || isPlatformSigningInStateText(text);
+}
+
 async function waitForPlatformEntryStateToSettle(timeout = 8000) {
   if (!(isPlatformLoginEntryPage() || isPlatformHomeRedirectPage() || isPlatformChatSessionPage() || isPlatformAuthCallbackPage() || isAuthReturnHomeIssueText(getVisiblePageText()))) {
     return null;
@@ -204,14 +211,16 @@ async function waitForPlatformEntryStateToSettle(timeout = 8000) {
   const start = Date.now();
   let sawPlatformRedirect = false;
   let lastHeartbeatAt = 0;
+  let waitingForIssueRecovery = isPlatformSigningBridgeState(getVisiblePageText());
 
-  while (Date.now() - start < timeout) {
+  while (Date.now() - start < (waitingForIssueRecovery ? Math.max(timeout, PLATFORM_SIGNING_BRIDGE_ISSUE_TIMEOUT_MS) : timeout)) {
     throwIfStopped();
     const visibleText = getVisiblePageText();
     const elapsedMs = Date.now() - start;
 
     if (await recoverPlatformEntryFromAuthIssueIfNeeded(visibleText)) {
       sawPlatformRedirect = true;
+      waitingForIssueRecovery = false;
       continue;
     }
 
@@ -223,8 +232,9 @@ async function waitForPlatformEntryStateToSettle(timeout = 8000) {
       return 'login';
     }
 
-    if (isPlatformHomeRedirectPage() || isPlatformAuthCallbackPage() || isPlatformSigningInStateText(visibleText)) {
+    if (isPlatformSigningBridgeState(visibleText)) {
       sawPlatformRedirect = true;
+      waitingForIssueRecovery = true;
       if (elapsedMs - lastHeartbeatAt >= 5000) {
         lastHeartbeatAt = elapsedMs;
         log(
@@ -245,9 +255,17 @@ async function waitForPlatformEntryStateToSettle(timeout = 8000) {
     return 'login';
   }
 
-  if (isPlatformAuthCallbackPage() || isPlatformSigningInStateText()) {
-    await bouncePlatformEntryViaAuthLogin('Platform entry stayed on the stale signing-in callback longer than expected.');
+  const finalVisibleText = getVisiblePageText();
+  if (await recoverPlatformEntryFromAuthIssueIfNeeded(finalVisibleText)) {
     return 'recovered';
+  }
+
+  if (isPlatformAuthCallbackPage() || isPlatformSigningInStateText(finalVisibleText)) {
+    log(
+      'Step 2: Platform entry stayed on the stale signing-in bridge without surfacing the return-home recovery page. Leaving the page as-is so the background retry can reopen platform login cleanly.',
+      'warn'
+    );
+    return null;
   }
 
   if (sawPlatformRedirect) {
@@ -255,14 +273,6 @@ async function waitForPlatformEntryStateToSettle(timeout = 8000) {
   }
 
   return null;
-}
-
-async function bouncePlatformEntryViaAuthLogin(reason) {
-  log(`Step 2: ${reason} Returning to auth home, then reopening the platform login entry...`, 'warn');
-  location.href = AUTH_LOGIN_HOME_URL;
-  await sleep(500);
-  location.href = PLATFORM_LOGIN_ENTRY_URL;
-  await sleep(500);
 }
 
 async function recoverPlatformEntryFromAuthIssueIfNeeded(visibleText = getVisiblePageText()) {
@@ -276,16 +286,14 @@ async function recoverPlatformEntryFromAuthIssueIfNeeded(visibleText = getVisibl
     2000
   ).catch(() => null);
 
-  if (returnHomeLink && isElementVisible(returnHomeLink)) {
-    await humanPause(350, 900);
-    simulateClick(returnHomeLink);
-    await sleep(500);
-  } else {
-    location.href = AUTH_LOGIN_HOME_URL;
-    await sleep(500);
+  if (!returnHomeLink || !isElementVisible(returnHomeLink)) {
+    return false;
   }
 
-  log('Step 2: Platform entry hit the auth issue page. Reopening the platform login entry through auth home...', 'warn');
+  await humanPause(350, 900);
+  simulateClick(returnHomeLink);
+  await sleep(500);
+  log('Step 2: Platform entry hit the auth issue page. Clicked "返回首页" before reopening the platform login entry...', 'warn');
   location.href = PLATFORM_LOGIN_ENTRY_URL;
   await sleep(500);
   return true;
@@ -1447,8 +1455,12 @@ function isAuthReturnHomeIssueText(text) {
     return true;
   }
 
-  return /糟糕[！!]?/i.test(normalized)
-    && /authenticating you|help\.openai\.com/i.test(normalized)
+  if (/invalid[_\s-]?state/i.test(normalized) && /返回首页|return home|back to home|home/i.test(normalized)) {
+    return true;
+  }
+
+  return /糟糕[！!]?|出错了|something went wrong|oops/i.test(normalized)
+    && /authenticating you|help\.openai\.com|invalid[_\s-]?state|验证过程中出错|验证过程.*出错|请重试|retry/i.test(normalized)
     && /返回首页|return home|back to home|home/i.test(normalized);
 }
 
