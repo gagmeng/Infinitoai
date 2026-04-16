@@ -1074,8 +1074,18 @@ function hasActiveVerificationInput() {
 function hasVisibleProfileFormInput() {
   const selectors = [
     'input[name="name"]',
+    'input[name="full_name"]',
+    'input[placeholder*="全名"]',
+    'input[placeholder*="name" i]',
+    'input[autocomplete="name"]',
+    'input[id*="name" i]:not([type="hidden"])',
     'input[name="age"]',
+    'input[placeholder*="年龄"]',
     'input[name="birthday"]',
+    'input[placeholder*="生日"]',
+    'input[placeholder*="日期"]',
+    'input[placeholder*="birth" i]',
+    'input[placeholder*="date" i]',
     '[role="spinbutton"][data-type="year"]',
     '[role="spinbutton"][data-type="month"]',
     '[role="spinbutton"][data-type="day"]',
