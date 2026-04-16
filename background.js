@@ -21,6 +21,7 @@ const {
   shouldRetryStep3WithPlatformLoginRefresh,
   shouldRetryStep3WithFreshOauth,
   shouldRetryStep6WithFreshOauth,
+  shouldRetryStep7Through9FromStep6,
   shouldRetryStep8WithFreshOauth,
   shouldSkipStepResultLog,
 } = RuntimeErrors;
@@ -2075,6 +2076,7 @@ async function executeStepAndWait(step, delayAfter = 2000, recoveryState = false
   const recoveredStep3PlatformLoginRefreshCount = Math.max(0, Number.parseInt(String(recoveryState?.step3PlatformLoginRefreshCount ?? 0), 10) || 0);
   const recoveredStep3Timeout = recoveryState === true || Boolean(recoveryState?.step3Timeout);
   const recoveredStep6PlatformLogin = Boolean(recoveryState && recoveryState !== true && recoveryState.step6PlatformLogin);
+  const recoveredStep7Through9FromStep6 = Boolean(recoveryState && recoveryState !== true && recoveryState.step7Through9FromStep6);
   const recoveredStep8UnexpectedRedirect = Boolean(recoveryState && recoveryState !== true && recoveryState.step8UnexpectedRedirect);
   const completionPromise = waitForStepComplete(step, 120000);
   const executionPromise = (async () => {
@@ -2123,6 +2125,16 @@ async function executeStepAndWait(step, delayAfter = 2000, recoveryState = false
     if (step === 8 && !recoveredStep8UnexpectedRedirect && shouldRetryStep8WithFreshOauth(err)) {
       await replaySteps6Through8WithCurrentAccount(
         'Step 8: Auth flow did not reach localhost and instead landed on another page. Refreshing the VPS OAuth link and replaying steps 6-8 with the same account...'
+      );
+      return;
+    }
+    if ([7, 8, 9].includes(step) && !recoveredStep7Through9FromStep6 && shouldRetryStep7Through9FromStep6(step, err)) {
+      await replaySteps6ThroughTargetStepWithCurrentAccount(
+        step,
+        `Step ${step}: ${err?.message || String(err || `unknown step ${step} error`)} Replaying steps 6-${step} once with the current account because registration already succeeded...`,
+        {
+          step7Through9FromStep6: true,
+        }
       );
       return;
     }
@@ -4448,6 +4460,18 @@ async function retryStep8ConsentClickIfStillVisible(signupTabId, {
   }
 
   const seconds = Math.max(1, Math.round(Math.max(0, Number(elapsedMs) || 0) / 1000));
+  if (clickResult?.hitTargetBlocked || elapsedMs >= 20000) {
+    const submitFallbackUsed = await tryStep8ConsentSubmitFallback(signupTabId, {
+      currentUrl,
+      elapsedMs,
+      hitTargetDescription: clickResult?.hitTargetDescription || '',
+      triggeredByBlockedHitTarget: Boolean(clickResult?.hitTargetBlocked),
+    });
+    if (submitFallbackUsed) {
+      return true;
+    }
+  }
+
   await addLog(
     `Step 8: Consent page is still visible during heartbeat after ${seconds}s; retrying the "继续" click...`,
     'warn'
@@ -4457,17 +4481,71 @@ async function retryStep8ConsentClickIfStillVisible(signupTabId, {
   return true;
 }
 
+async function tryStep8ConsentSubmitFallback(signupTabId, {
+  currentUrl = '',
+  elapsedMs = 0,
+  hitTargetDescription = '',
+  triggeredByBlockedHitTarget = false,
+} = {}) {
+  if (!signupTabId || !/auth\.openai\.com\/sign-in-with-chatgpt\/.+\/consent/i.test(String(currentUrl || ''))) {
+    return false;
+  }
+
+  let submitResult = null;
+  try {
+    submitResult = await sendToContentScript('signup-page', {
+      type: 'STEP8_TRY_SUBMIT',
+      source: 'background',
+      payload: {},
+    });
+  } catch (err) {
+    const message = err?.message || '';
+    if (isMessageChannelClosedError(message) || isReceivingEndMissingError(message)) {
+      return false;
+    }
+    throw err;
+  }
+
+  if (!submitResult?.usedFallbackSubmit) {
+    return false;
+  }
+
+  const seconds = Math.max(1, Math.round(Math.max(0, Number(elapsedMs) || 0) / 1000));
+  const reasonSuffix = triggeredByBlockedHitTarget && hitTargetDescription
+    ? ` because the consent button click point is covered by ${hitTargetDescription}`
+    : '';
+  await addLog(
+    `Step 8: Consent page is still visible during heartbeat after ${seconds}s${reasonSuffix}. Trying an in-page submit fallback before another debugger click...`,
+    'warn'
+  );
+  await addLog(
+    `Step 8: In-page consent submit fallback dispatched via ${submitResult.submitMethod || 'unknown method'}, waiting for redirect...`,
+    'info'
+  );
+  return true;
+}
+
 async function replaySteps6Through8WithCurrentAccount(logMessage, recoveryState = {}) {
+  return await replaySteps6ThroughTargetStepWithCurrentAccount(8, logMessage, {
+    ...recoveryState,
+    step8UnexpectedRedirect: true,
+  });
+}
+
+async function replaySteps6ThroughTargetStepWithCurrentAccount(targetStep, logMessage, recoveryState = {}) {
+  targetStep = Math.max(6, Number.parseInt(String(targetStep ?? '').trim(), 10) || 6);
   await addLog(logMessage, 'warn');
   await setState({ localhostUrl: null });
   broadcastDataUpdate({ localhostUrl: null });
 
   await executeStepAndWait(6, 2000);
-  await executeStepAndWait(7, 2000);
-  await executeStepAndWait(8, 1000, {
-    ...recoveryState,
-    step8UnexpectedRedirect: true,
-  });
+  for (let replayStep = 7; replayStep <= targetStep; replayStep++) {
+    await executeStepAndWait(
+      replayStep,
+      replayStep === 8 ? 1000 : 2000,
+      replayStep === targetStep ? recoveryState : false
+    );
+  }
 
   return await getState();
 }
@@ -4575,8 +4653,24 @@ async function executeStep8(state) {
         }
 
         if (!resolved) {
-          await clickWithDebugger(signupTabId, clickResult?.rect);
-          await addLog('Step 8: Debugger click dispatched, waiting for redirect...');
+          let dispatchedInitialSubmitFallback = false;
+          if (clickResult?.hitTargetBlocked) {
+            await addLog(
+              `Step 8: Consent continue button is visible, but its click point is currently covered by ${clickResult.hitTargetDescription || 'another element'}. Trying an in-page submit fallback before the debugger click...`,
+              'warn'
+            );
+            dispatchedInitialSubmitFallback = await tryStep8ConsentSubmitFallback(signupTabId, {
+              currentUrl: clickResult?.url || state.oauthUrl,
+              elapsedMs: 0,
+              hitTargetDescription: clickResult?.hitTargetDescription || '',
+              triggeredByBlockedHitTarget: true,
+            });
+          }
+
+          if (!dispatchedInitialSubmitFallback) {
+            await clickWithDebugger(signupTabId, clickResult?.rect);
+            await addLog('Step 8: Debugger click dispatched, waiting for redirect...');
+          }
 
           // Fallback: poll tab URL in case webNavigation listeners missed the redirect
           let unexpectedRedirectHits = 0;

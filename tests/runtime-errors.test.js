@@ -9,6 +9,7 @@ const {
   shouldRetryStep3WithPlatformLoginRefresh,
   shouldRetryStep3WithFreshOauth,
   shouldRetryStep6WithFreshOauth,
+  shouldRetryStep7Through9FromStep6,
   shouldRetryStep8WithFreshOauth,
 } = require('../shared/runtime-errors.js');
 
@@ -152,6 +153,40 @@ test('step 8 unexpected auth redirect errors trigger a fresh oauth retry plan', 
   );
   assert.equal(
     shouldRetryStep8WithFreshOauth('Step 8 failed: Could not find "继续" button on OAuth consent page.'),
+    false
+  );
+});
+
+test('steps 7-9 generally retry once from step 6 after recoverable failures', () => {
+  assert.equal(
+    shouldRetryStep7Through9FromStep6(7, 'Step 7 failed: Could not find verification code input. URL: https://auth.openai.com/email-verification'),
+    true
+  );
+  assert.equal(
+    shouldRetryStep7Through9FromStep6(8, 'Step 8 failed: Localhost redirect not captured after 120s. Step 8 click may have been blocked.'),
+    true
+  );
+  assert.equal(
+    shouldRetryStep7Through9FromStep6(9, 'Step 9 failed: Could not establish connection to VPS panel after filling callback URL.'),
+    true
+  );
+});
+
+test('steps 7-9 do not retry from step 6 for hard blockers or unrelated steps', () => {
+  assert.equal(
+    shouldRetryStep7Through9FromStep6(7, 'Step 7 blocked: phone number is required on the auth page. Please change node and retry.'),
+    false
+  );
+  assert.equal(
+    shouldRetryStep7Through9FromStep6(8, 'Step 8 blocked: auth page still requires phone verification.'),
+    false
+  );
+  assert.equal(
+    shouldRetryStep7Through9FromStep6(9, 'VPS URL not set. Please enter VPS URL in the side panel.'),
+    false
+  );
+  assert.equal(
+    shouldRetryStep7Through9FromStep6(6, 'Step 6 failed: Login did not advance after password submit. Still on the password page.'),
     false
   );
 });

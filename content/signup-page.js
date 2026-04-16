@@ -22,7 +22,7 @@ const { getUnsupportedEmailBlockedMessage, isUnsupportedEmailBlockingStep, isUns
 
 // Listen for commands from Background
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
-  if (message.type === 'EXECUTE_STEP' || message.type === 'FILL_CODE' || message.type === 'STEP8_FIND_AND_CLICK' || message.type === 'CLICK_RESEND_EMAIL' || message.type === 'CHECK_AUTH_PAGE_STATE') {
+  if (message.type === 'EXECUTE_STEP' || message.type === 'FILL_CODE' || message.type === 'STEP8_FIND_AND_CLICK' || message.type === 'STEP8_TRY_SUBMIT' || message.type === 'CLICK_RESEND_EMAIL' || message.type === 'CHECK_AUTH_PAGE_STATE') {
     resetStopState(message.controlSequence);
     handleCommand(message).then((result) => {
       sendResponse({ ok: true, ...(result || {}) });
@@ -33,7 +33,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         return;
       }
 
-      if (message.type === 'STEP8_FIND_AND_CLICK') {
+      if (message.type === 'STEP8_FIND_AND_CLICK' || message.type === 'STEP8_TRY_SUBMIT') {
         log(`Step 8: ${err.message}`, 'error');
         sendResponse({ error: err.message });
         return;
@@ -64,6 +64,8 @@ async function handleCommand(message) {
       return await clickResendEmail(message.step);
     case 'STEP8_FIND_AND_CLICK':
       return await step8_findAndClick();
+    case 'STEP8_TRY_SUBMIT':
+      return await step8_trySubmit();
     case 'CHECK_AUTH_PAGE_STATE':
       return getAuthPageState();
   }
@@ -1538,27 +1540,83 @@ async function step8_findAndClick() {
   await sleep(250);
 
   const rect = getSerializableRect(continueBtn);
+  const hitTarget = describeElementAtRectCenter(continueBtn, rect);
   log('Step 8: Found "继续" button and prepared debugger click coordinates.');
   return {
     rect,
     buttonText: (continueBtn.textContent || '').trim(),
+    hitTargetBlocked: hitTarget.blocked,
+    hitTargetDescription: hitTarget.description,
+    url: location.href,
+  };
+}
+
+async function step8_trySubmit() {
+  const continueBtn = await findContinueButton();
+  await waitForButtonEnabled(continueBtn);
+
+  await humanPause(250, 650);
+  continueBtn.scrollIntoView({ behavior: 'smooth', block: 'center' });
+  continueBtn.focus();
+  await sleep(150);
+
+  const form = continueBtn.form || continueBtn.closest?.('form') || null;
+  if (form?.requestSubmit) {
+    form.requestSubmit(continueBtn);
+    return {
+      usedFallbackSubmit: true,
+      submitMethod: 'requestSubmit',
+      url: location.href,
+    };
+  }
+
+  if (form?.submit) {
+    form.submit();
+    return {
+      usedFallbackSubmit: true,
+      submitMethod: 'form.submit',
+      url: location.href,
+    };
+  }
+
+  if (typeof continueBtn.click === 'function') {
+    continueBtn.click();
+    return {
+      usedFallbackSubmit: true,
+      submitMethod: 'nativeClick',
+      url: location.href,
+    };
+  }
+
+  simulateClick(continueBtn);
+  return {
+    usedFallbackSubmit: true,
+    submitMethod: 'simulateClick',
     url: location.href,
   };
 }
 
 async function findContinueButton() {
   try {
-    return await waitForElement(
+    const button = await waitForElement(
       'button[type="submit"][data-dd-action-name="Continue"], button[type="submit"]._primary_3rdp0_107',
       10000
     );
-  } catch {
-    try {
-      return await waitForElementByText('button', /继续|Continue/, 5000);
-    } catch {
-      throw new Error('Could not find "继续" button on OAuth consent page. URL: ' + location.href);
+    if (button && isElementVisible(button)) {
+      return button;
     }
+  } catch {
   }
+
+  try {
+    const byTextButton = await waitForElementByText('button, [role="button"]', /继续|Continue/, 5000);
+    if (byTextButton && isElementVisible(byTextButton)) {
+      return byTextButton;
+    }
+  } catch {
+  }
+
+  throw new Error('Could not find "继续" button on OAuth consent page. URL: ' + location.href);
 }
 
 async function waitForButtonEnabled(button, timeout = 8000) {
@@ -1590,6 +1648,28 @@ function getSerializableRect(el) {
     height: rect.height,
     centerX: rect.left + (rect.width / 2),
     centerY: rect.top + (rect.height / 2),
+  };
+}
+
+function describeElementAtRectCenter(button, rect = null) {
+  if (!button || typeof document.elementFromPoint !== 'function') {
+    return { blocked: false, description: '' };
+  }
+
+  const resolvedRect = rect || getSerializableRect(button);
+  const x = Math.round(resolvedRect.centerX);
+  const y = Math.round(resolvedRect.centerY);
+  const hitTarget = document.elementFromPoint(x, y);
+
+  if (!hitTarget || hitTarget === button || button.contains?.(hitTarget)) {
+    return { blocked: false, description: '' };
+  }
+
+  const tag = String(hitTarget.tagName || hitTarget.nodeName || 'unknown').toUpperCase();
+  const text = String(hitTarget.textContent || '').trim().replace(/\s+/g, ' ').slice(0, 80);
+  return {
+    blocked: true,
+    description: text ? `${tag} "${text}"` : tag,
   };
 }
 

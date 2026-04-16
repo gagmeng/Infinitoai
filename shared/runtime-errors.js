@@ -66,6 +66,28 @@
     return /step 8 recoverable: auth flow landed on an unexpected page before localhost redirect/i.test(message);
   }
 
+  function shouldRetryStep7Through9FromStep6(step, error) {
+    const normalizedStep = Number.parseInt(String(step ?? '').trim(), 10);
+    if (![7, 8, 9].includes(normalizedStep)) {
+      return false;
+    }
+
+    const message = typeof error === 'string' ? error : error?.message || '';
+    if (!message) {
+      return false;
+    }
+
+    if (/phone verification|phone number is required|change node and retry/i.test(message)) {
+      return false;
+    }
+
+    if (/vps url not set|flow stopped by user|auto run handed off to manual continuation/i.test(message)) {
+      return false;
+    }
+
+    return true;
+  }
+
   return {
     buildMailPollRecoveryPlan,
     isMessageChannelClosedError,
@@ -74,6 +96,7 @@
     shouldRetryStep3WithPlatformLoginRefresh,
     shouldRetryStep3WithFreshOauth,
     shouldRetryStep6WithFreshOauth,
+    shouldRetryStep7Through9FromStep6,
     shouldRetryStep8WithFreshOauth,
     shouldSkipStepResultLog,
   };

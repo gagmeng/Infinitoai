@@ -12,6 +12,7 @@ function createContext({
   waitForElementByTextImpl,
   querySelectorImpl,
   querySelectorAllImpl,
+  elementFromPointImpl,
   reportCompleteImpl,
 } = {}) {
   const listeners = [];
@@ -40,6 +41,12 @@ function createContext({
       },
       querySelectorAll(selector) {
         return querySelectorAllImpl ? querySelectorAllImpl(selector) : [];
+      },
+      elementFromPoint(x, y) {
+        if (elementFromPointImpl) {
+          return elementFromPointImpl(x, y);
+        }
+        return null;
       },
     },
     chrome: {
@@ -2652,6 +2659,117 @@ test('step 8 exposes fresh debugger click coordinates when the consent page is s
       centerY: 104,
     }
   );
+});
+
+test('step 8 reports when the consent continue button click point is covered', async () => {
+  const overlay = {
+    tagName: 'DIV',
+    textContent: 'Loading overlay',
+  };
+  const continueButton = {
+    textContent: '继续',
+    disabled: false,
+    getAttribute(name) {
+      return name === 'aria-disabled' ? 'false' : null;
+    },
+    contains(node) {
+      return node === this;
+    },
+    scrollIntoView() {},
+    focus() {},
+    getBoundingClientRect() {
+      return { left: 40, top: 80, width: 160, height: 48 };
+    },
+  };
+
+  const context = createContext({
+    href: 'https://auth.openai.com/sign-in-with-chatgpt/codex/consent',
+    bodyText: '使用 ChatGPT 登录到 Codex 继续',
+    elementFromPointImpl() {
+      return overlay;
+    },
+    waitForElementImpl(selector) {
+      if (selector.includes('button[type="submit"]')) {
+        return Promise.resolve(continueButton);
+      }
+      return Promise.reject(new Error(`missing: ${selector}`));
+    },
+  });
+  loadSignupPage(context);
+
+  const listener = context.__listeners[0];
+  assert.ok(listener, 'expected signup-page to register a runtime listener');
+
+  const response = await new Promise((resolve, reject) => {
+    const keepAlive = listener(
+      { type: 'STEP8_FIND_AND_CLICK', source: 'background', payload: {} },
+      {},
+      (result) => resolve(result)
+    );
+    assert.equal(keepAlive, true);
+    setTimeout(() => reject(new Error('timeout waiting for response')), 3000);
+  });
+
+  assert.equal(response?.ok, true);
+  assert.equal(response?.hitTargetBlocked, true);
+  assert.match(response?.hitTargetDescription || '', /DIV/i);
+  assert.match(response?.hitTargetDescription || '', /Loading overlay/i);
+});
+
+test('step 8 can trigger an in-page consent submit fallback when the consent page stays visible', async () => {
+  let requestSubmitCalls = 0;
+  const form = {
+    requestSubmit(button) {
+      requestSubmitCalls += 1;
+      assert.equal(button, continueButton);
+    },
+  };
+  const continueButton = {
+    textContent: '继续',
+    disabled: false,
+    form,
+    getAttribute(name) {
+      return name === 'aria-disabled' ? 'false' : null;
+    },
+    contains(node) {
+      return node === this;
+    },
+    scrollIntoView() {},
+    focus() {},
+    getBoundingClientRect() {
+      return { left: 40, top: 80, width: 160, height: 48 };
+    },
+  };
+
+  const context = createContext({
+    href: 'https://auth.openai.com/sign-in-with-chatgpt/codex/consent',
+    bodyText: '使用 ChatGPT 登录到 Codex 继续',
+    waitForElementImpl(selector) {
+      if (selector.includes('button[type="submit"]')) {
+        return Promise.resolve(continueButton);
+      }
+      return Promise.reject(new Error(`missing: ${selector}`));
+    },
+  });
+  loadSignupPage(context);
+
+  const listener = context.__listeners[0];
+  assert.ok(listener, 'expected signup-page to register a runtime listener');
+
+  const response = await new Promise((resolve, reject) => {
+    const keepAlive = listener(
+      { type: 'STEP8_TRY_SUBMIT', source: 'background', payload: {} },
+      {},
+      (result) => resolve(result)
+    );
+    assert.equal(keepAlive, true);
+    setTimeout(() => reject(new Error('timeout waiting for response')), 3000);
+  });
+
+  assert.equal(response?.ok, true);
+  assert.equal(response?.usedFallbackSubmit, true);
+  assert.equal(response?.submitMethod, 'requestSubmit');
+  assert.equal(requestSubmitCalls, 1);
 });
 
 test('step 4 does not report success when the verification form stays visible with a disabled continue button', async () => {

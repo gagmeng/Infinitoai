@@ -236,6 +236,49 @@ test('step 8 heartbeats retry the consent-page continue click when the auth page
   );
 });
 
+test('step 8 falls back to an in-page consent submit when the continue button stays covered or consent keeps stalling', () => {
+  const backgroundSource = readProjectFile('background.js');
+
+  assert.match(
+    backgroundSource,
+    /async function tryStep8ConsentSubmitFallback\(/i
+  );
+  assert.match(
+    backgroundSource,
+    /type:\s*'STEP8_TRY_SUBMIT'/i
+  );
+  assert.match(
+    backgroundSource,
+    /clickResult\?\.hitTargetBlocked[\s\S]*tryStep8ConsentSubmitFallback\(/i
+  );
+  assert.match(
+    backgroundSource,
+    /elapsedMs >= 20000[\s\S]*tryStep8ConsentSubmitFallback\(/i
+  );
+});
+
+test('steps 7-9 replay from step 6 once before failing the run', () => {
+  const backgroundSource = readProjectFile('background.js');
+  const runtimeErrorsSource = readProjectFile(path.join('shared', 'runtime-errors.js'));
+
+  assert.match(
+    runtimeErrorsSource,
+    /function shouldRetryStep7Through9FromStep6\(step,\s*error\)/i
+  );
+  assert.match(
+    backgroundSource,
+    /const recoveredStep7Through9FromStep6 = Boolean\(recoveryState && recoveryState !== true && recoveryState\.step7Through9FromStep6\);/i
+  );
+  assert.match(
+    backgroundSource,
+    /if \(\[7,\s*8,\s*9\]\.includes\(step\) && !recoveredStep7Through9FromStep6 && shouldRetryStep7Through9FromStep6\(step,\s*err\)\)[\s\S]*await replaySteps6ThroughTargetStepWithCurrentAccount\([\s\S]*return;/i
+  );
+  assert.match(
+    backgroundSource,
+    /async function replaySteps6ThroughTargetStepWithCurrentAccount\(targetStep,\s*logMessage,\s*recoveryState = \{\}\) \{[\s\S]*await executeStepAndWait\(6,\s*2000\);[\s\S]*for \(let replayStep = 7; replayStep <= targetStep; replayStep\+\+\)/i
+  );
+});
+
 test('step 4 and step 5 skip signup-only work when step 3 already identified an existing account login flow', () => {
   const backgroundSource = readProjectFile('background.js');
 
