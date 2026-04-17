@@ -1382,7 +1382,7 @@ header {
 
 .toast {
   display: flex;
-  align-items: center;
+  align-items: flex-start;
   gap: 8px;
   padding: 10px 14px;
   border-radius: var(--radius-md);
@@ -1460,19 +1460,31 @@ header {
 
 .toast-msg {
   flex: 1;
+  min-width: 0;
+  line-height: 1.4;
+  word-break: break-word;
 }
 
 .toast-close {
-  background: none;
-  border: none;
+  flex-shrink: 0;
+  min-width: 48px;
+  padding: 4px 10px;
+  border-radius: 999px;
+  border: 1px solid currentColor;
+  background: transparent;
   color: inherit;
-  opacity: 0.6;
+  opacity: 0.82;
   cursor: pointer;
-  padding: 2px;
-  font-size: 16px;
-  line-height: 1;
+  font-size: 12px;
+  font-weight: 600;
+  line-height: 1.2;
+  white-space: nowrap;
+  align-self: center;
 }
-.toast-close:hover { opacity: 1; }
+.toast-close:hover,
+.toast-close:focus-visible {
+  opacity: 1;
+}
 
 @keyframes toastIn {
   from { opacity: 0; transform: translateY(-10px) scale(0.96); }

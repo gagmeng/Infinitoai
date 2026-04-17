@@ -35,14 +35,22 @@ const { isVpsAuthorizationNotPendingText } = FlowRecovery;
 
 // Listen for commands from Background
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
-  if (message.type === 'EXECUTE_STEP') {
+  if (message.type === 'EXECUTE_STEP' || message.type === 'FETCH_OAUTH_URL') {
     resetStopState(message.controlSequence);
-    handleStep(message.step, message.payload).then((result) => {
+    const handler = message.type === 'FETCH_OAUTH_URL'
+      ? handleAction(message.type, message.payload)
+      : handleStep(message.step, message.payload);
+    handler.then((result) => {
       sendResponse({ ok: true, ...(result || {}) });
     }).catch(err => {
       if (isStopError(err)) {
-        log(`第 ${message.step} 步：已由用户停止。`, 'warn');
+        const stopStep = Number.parseInt(String(message.step ?? message.payload?.logStep ?? 1), 10) || 1;
+        log(`第 ${stopStep} 步：已由用户停止。`, 'warn');
         sendResponse({ stopped: true, error: err.message });
+        return;
+      }
+      if (message.type === 'FETCH_OAUTH_URL') {
+        sendResponse({ error: err.message });
         return;
       }
       reportError(message.step, err.message);
@@ -61,11 +69,27 @@ async function handleStep(step, payload) {
   }
 }
 
+async function handleAction(type, payload) {
+  switch (type) {
+    case 'FETCH_OAUTH_URL':
+      return await fetchOAuthUrlFromPanel({
+        logStep: payload?.logStep,
+        completeStep: null,
+      });
+    default:
+      throw new Error(`vps-panel.js does not handle action ${type}`);
+  }
+}
+
 // ============================================================
 // Step 1: Get OAuth Link
 // ============================================================
 
-async function step1_getOAuthLink() {
+async function fetchOAuthUrlFromPanel(options = {}) {
+  const logStep = Number.parseInt(String(options?.logStep ?? 1), 10) || 1;
+  const completeStep = Number.isFinite(options?.completeStep) ? options.completeStep : null;
+  const stepLabel = `Step ${logStep}`;
+  const stepLabelZh = `第 ${logStep} 步`;
   const maxCardLoadAttempts = 3;
   let loginBtn = null;
 
@@ -75,18 +99,18 @@ async function step1_getOAuthLink() {
       const state = await chrome.runtime.sendMessage({ type: 'GET_STATE' }).catch(() => null);
       const fallbackUrl = String(state?.vpsUrl || '').trim();
       if (fallbackUrl && fallbackUrl !== location.href) {
-        log('第 1 步：VPS 返回 502，改为重新打开已配置的 OAuth 页面，而不是刷新错误页。', 'warn');
+        log(`${stepLabelZh}：VPS 返回 502，改为重新打开已配置的 OAuth 页面，而不是刷新错误页。`, 'warn');
         location.href = fallbackUrl;
       }
       throw new Error('VPS panel returned 502 Bad Gateway. Re-opened the configured OAuth page. If it still fails, switch node or VPS and retry.');
     }
 
-    log(`Step 1: Waiting for VPS panel to load (attempt ${attempt}/${maxCardLoadAttempts})...`);
+    log(`${stepLabel}: Waiting for VPS panel to load (attempt ${attempt}/${maxCardLoadAttempts})...`);
 
     try {
       const header = await waitForElementByText('.card-header', /codex/i, 30000);
       loginBtn = header.querySelector('button.btn.btn-primary, button.btn');
-      log('Step 1: Found Codex OAuth card');
+      log(`${stepLabel}: Found Codex OAuth card`);
       break;
     } catch {
       if (attempt >= maxCardLoadAttempts) {
@@ -96,7 +120,7 @@ async function step1_getOAuthLink() {
         );
       }
 
-      log(`第 1 步：第 ${attempt} 次尝试时 Codex OAuth 卡片仍未就绪，准备刷新 VPS 页面后重试。`, 'warn');
+      log(`${stepLabelZh}：第 ${attempt} 次尝试时 Codex OAuth 卡片仍未就绪，准备刷新 VPS 页面后重试。`, 'warn');
       location.reload();
       await sleep(2500);
     }
@@ -108,11 +132,11 @@ async function step1_getOAuthLink() {
 
   // Check if button is disabled (already clicked / loading)
   if (loginBtn.disabled) {
-    log('Step 1: Login button is disabled (already loading), waiting for auth URL...');
+    log(`${stepLabel}: Login button is disabled (already loading), waiting for auth URL...`);
   } else {
     await humanPause(500, 1400);
     simulateClick(loginBtn);
-    log('Step 1: Clicked login button, waiting for auth URL...');
+    log(`${stepLabel}: Clicked login button, waiting for auth URL...`);
   }
 
   // Wait for the auth URL to appear in the specific div
@@ -131,8 +155,18 @@ async function step1_getOAuthLink() {
     throw new Error(`Invalid OAuth URL found: "${oauthUrl.slice(0, 50)}". Expected URL starting with http.`);
   }
 
-  log(`第 1 步：已获取 OAuth URL：${oauthUrl.slice(0, 80)}...`, 'ok');
-  reportComplete(1, { oauthUrl });
+  log(`${stepLabelZh}：已获取 OAuth URL：${oauthUrl.slice(0, 80)}...`, 'ok');
+  if (completeStep != null) {
+    reportComplete(completeStep, { oauthUrl });
+  }
+  return { oauthUrl };
+}
+
+async function step1_getOAuthLink() {
+  return await fetchOAuthUrlFromPanel({
+    logStep: 1,
+    completeStep: 1,
+  });
 }
 
 // ============================================================

@@ -4161,15 +4161,70 @@ async function submitVerificationCodeWithRecovery(step, code, options = {}) {
 
   await chrome.tabs.update(signupTabId, { active: true });
   let submitResult = null;
+  const step4AdvanceMonitor = { finished: false };
 
   try {
-    submitResult = await sendToContentScript('signup-page', {
+    if (step === 4) {
+      await addLog(`第 ${step} 步：已拿到验证码，正在切回 auth 页面并开始填写。`, 'info');
+    }
+
+    const submitResponsePromise = sendToContentScript('signup-page', {
       type: 'FILL_CODE',
       step,
       source: 'background',
       payload: { code },
-    });
+    }).then(
+      (result) => ({ kind: 'submit-response', result }),
+      (error) => ({ kind: 'submit-error', error })
+    );
+    const step4AdvanceSignalPromise = step === 4
+      ? waitForStep4VerificationAdvanceSignal(step, {
+        shouldStop: () => step4AdvanceMonitor.finished,
+      }).then((result) => result
+        ? ({ kind: 'step4-advance-signal', result })
+        : ({ kind: 'step4-advance-timeout' }))
+      : null;
+    const step4SlowFillRecoveryPromise = step === 4
+      ? waitForStep4SlowCodeFillRecovery(step, code, {
+        shouldStop: () => step4AdvanceMonitor.finished,
+      }).then((result) => result
+        ? ({ kind: 'step4-slow-fill-recovery', result })
+        : ({ kind: 'step4-slow-fill-timeout' }))
+      : null;
+
+    const step4RecoveryRacers = [submitResponsePromise];
+    if (step4AdvanceSignalPromise) {
+      step4RecoveryRacers.push(step4AdvanceSignalPromise);
+    }
+    if (step4SlowFillRecoveryPromise) {
+      step4RecoveryRacers.push(step4SlowFillRecoveryPromise);
+    }
+
+    const submitRaceResult = step4RecoveryRacers.length > 1
+      ? await Promise.race(step4RecoveryRacers)
+      : await submitResponsePromise;
+    const finalSubmitRaceResult = (
+      submitRaceResult?.kind === 'step4-advance-timeout'
+      || submitRaceResult?.kind === 'step4-slow-fill-timeout'
+    )
+      ? await submitResponsePromise
+      : submitRaceResult;
+    step4AdvanceMonitor.finished = true;
+
+    if (
+      (finalSubmitRaceResult?.kind === 'step4-advance-signal' || finalSubmitRaceResult?.kind === 'step4-slow-fill-recovery')
+      && (finalSubmitRaceResult?.result?.accepted || finalSubmitRaceResult?.result?.retryInbox)
+    ) {
+      return finalSubmitRaceResult.result;
+    }
+
+    if (finalSubmitRaceResult?.kind === 'submit-error') {
+      throw finalSubmitRaceResult.error;
+    }
+
+    submitResult = finalSubmitRaceResult?.result || null;
   } catch (err) {
+    step4AdvanceMonitor.finished = true;
     const message = err?.message || '';
     if (/message port closed|receiving end does not exist|tab was closed/i.test(message)) {
       await addLog(`Step ${step}: Signup page navigated before submit response; waiting for completion signal...`, 'info');
@@ -4278,6 +4333,94 @@ function isStableStep5SuccessUrl(url = '') {
     return /platform\.openai\.com\/auth\/callback/i.test(normalizedUrl)
       || /platform\.openai\.com\/welcome\?step=create/i.test(normalizedUrl);
   }
+}
+
+function isStep4VerificationAdvanceState(pageState = {}) {
+  if (!pageState) {
+    return false;
+  }
+
+  if (pageState?.hasReadyProfilePage || isStableStep5SuccessUrl(pageState?.url)) {
+    return true;
+  }
+
+  return Boolean(
+    pageState?.hasVisibleProfileFormInput
+    && isCanonicalAboutYouUrl(pageState?.url)
+  );
+}
+
+async function waitForStep4VerificationAdvanceSignal(step, options = {}) {
+  const {
+    timeoutMs = 15000,
+    intervalMs = 1000,
+    shouldStop = () => false,
+  } = options;
+  const start = Date.now();
+
+  while (Date.now() - start < timeoutMs) {
+    if (shouldStop()) {
+      return null;
+    }
+
+    const pageState = await getSignupAuthPageState().catch(() => null);
+    if (isStep4VerificationAdvanceState(pageState)) {
+      if (shouldStop()) {
+        return null;
+      }
+      await addLog(
+        `第 ${step} 步：检测到验证码提交流程后页面已进入资料页/创建成功页，提前按第 4 步成功处理。 | 调试：URL=${pageState?.url || 'unknown'}; profile=${Boolean(pageState?.hasVisibleProfileFormInput)}; readyProfile=${Boolean(pageState?.hasReadyProfilePage)}`,
+        'info'
+      );
+      return {
+        accepted: true,
+        reason: 'step4-page-advance-signal',
+        url: pageState?.url || '',
+      };
+    }
+    await sleepWithStop(intervalMs);
+  }
+
+  return null;
+}
+
+async function waitForStep4SlowCodeFillRecovery(step, code, options = {}) {
+  const {
+    delayMs = 4000,
+    shouldStop = () => false,
+  } = options;
+
+  await sleepWithStop(delayMs);
+  if (shouldStop()) {
+    return null;
+  }
+
+  const pageState = await getSignupAuthPageState().catch(() => null);
+  if (shouldStop()) {
+    return null;
+  }
+
+  const stillOnVerificationPage = Boolean(
+    pageState?.hasReadyVerificationPage
+    || pageState?.hasVisibleVerificationInput
+    || isCanonicalEmailVerificationUrl(pageState?.url)
+  );
+
+  if (!stillOnVerificationPage) {
+    return null;
+  }
+
+  await addLog(
+    `第 ${step} 步：验证码已拿到，但 auth 验证页暂时没有开始响应，先直接在当前页补填一次验证码。 | 调试：URL=${pageState?.url || 'unknown'}; verification=${Boolean(pageState?.hasVisibleVerificationInput)}; readyVerification=${Boolean(pageState?.hasReadyVerificationPage)}`,
+    'warn'
+  );
+
+  const directRetryResult = await tryDirectVerificationCodeFillOnCurrentSignupPage(step, code);
+  if (directRetryResult?.accepted || directRetryResult?.retryInbox) {
+    return directRetryResult;
+  }
+
+  return null;
 }
 
 async function getSignupPageFallbackAuthState() {
@@ -4871,20 +5014,48 @@ async function waitForStep5CompletionSignalOrRecoveredAuthState() {
 // Step 6: Login ChatGPT (Background opens tab, chatgpt.js handles login)
 // ============================================================
 
-async function refreshOauthUrl(state, stepLabel, reason) {
-  await addLog(`${stepLabel}: ${reason}`, 'info');
-  const waitForRefresh = waitForStepComplete(1, 120000);
-  await executeStep1(state);
-  const refreshPayload = await waitForRefresh;
+async function fetchFreshOauthUrlFromVps(state, options = {}) {
+  const {
+    logStep = 1,
+    reason = 'Refreshing the VPS OAuth link...',
+  } = options;
+
+  if (!state.vpsUrl) {
+    throw new Error('No VPS URL configured. Enter VPS address in Side Panel first.');
+  }
+
+  await addLog(`Step ${logStep}: ${reason}`, 'info');
+  await reuseOrCreateTab('vps-panel', state.vpsUrl, {
+    inject: ['shared/flow-recovery.js', 'content/utils.js', 'content/vps-panel.js'],
+    reloadIfSameUrl: true,
+  });
+
+  const refreshResult = await sendToContentScript('vps-panel', {
+    type: 'FETCH_OAUTH_URL',
+    source: 'background',
+    payload: { logStep },
+  });
+
+  const oauthUrl = String(refreshResult?.oauthUrl || '').trim();
+  if (!oauthUrl) {
+    throw new Error('VPS panel did not return a usable OAuth URL.');
+  }
+
+  await setState({ oauthUrl });
+  broadcastDataUpdate({ oauthUrl });
+
   const latestState = await getState();
   return {
     ...latestState,
-    oauthUrl: refreshPayload?.oauthUrl || latestState.oauthUrl || '',
+    oauthUrl,
   };
 }
 
 async function refreshOauthUrlBeforeStep6(state, reason = 'Refreshing the VPS OAuth link before login...') {
-  return await refreshOauthUrl(state, 'Step 6', reason);
+  return await fetchFreshOauthUrlFromVps(state, {
+    logStep: 6,
+    reason,
+  });
 }
 
 async function recoverStep3OauthTimeout() {
@@ -4957,7 +5128,10 @@ async function executeStep6(state) {
 
   await addLog(`Step 6: Opening OAuth URL for login...`);
   // Reuse the signup-page tab — navigate it to the OAuth URL
-  await reuseOrCreateTab('signup-page', effectiveState.oauthUrl);
+  await reuseOrCreateTab('signup-page', effectiveState.oauthUrl, {
+    reuseActiveTabOnCreate: true,
+    reloadIfSameUrl: true,
+  });
 
   // signup-page.js will inject (same auth.openai.com domain) and handle login
   try {

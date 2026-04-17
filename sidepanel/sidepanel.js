@@ -220,7 +220,7 @@ function showToast(message, type = 'error', duration, options = {}) {
 
   const toast = document.createElement('div');
   toast.className = `toast toast-${type}`;
-  toast.innerHTML = `${TOAST_ICONS[type] || ''}<span class="toast-msg">${escapeHtml(displayMessage)}</span><button class="toast-close">&times;</button>`;
+  toast.innerHTML = `${TOAST_ICONS[type] || ''}<span class="toast-msg">${escapeHtml(displayMessage)}</span><button type="button" class="toast-close" aria-label="关闭提示" title="关闭提示">关闭</button>`;
   toast.dataset.toastKey = toastKey;
 
   toast.querySelector('.toast-close').addEventListener('click', () => dismissToast(toast));
@@ -244,19 +244,28 @@ function scheduleToastDismiss(toast, duration) {
 }
 
 function dismissToast(toast) {
-  if (!toast.parentNode) return;
+  if (!toast?.parentNode || toast.dataset.dismissing === 'true') return;
   if (toast._dismissTimer) {
     clearTimeout(toast._dismissTimer);
     toast._dismissTimer = null;
   }
+  toast.dataset.dismissing = 'true';
   toast.classList.add('toast-exit');
+  setTimeout(() => finalizeToastDismiss(toast), 260);
   toast.addEventListener('animationend', () => {
-    const toastKey = toast.dataset.toastKey;
-    if (toastKey && activeToasts.get(toastKey)?.toast === toast) {
-      activeToasts.delete(toastKey);
-    }
-    toast.remove();
+    finalizeToastDismiss(toast);
   }, { once: true });
+}
+
+function finalizeToastDismiss(toast) {
+  if (!toast?.parentNode) {
+    return;
+  }
+  const toastKey = toast.dataset.toastKey;
+  if (toastKey && activeToasts.get(toastKey)?.toast === toast) {
+    activeToasts.delete(toastKey);
+  }
+  toast.remove();
 }
 
 // ============================================================

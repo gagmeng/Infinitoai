@@ -406,6 +406,60 @@ test('step 4 direct verification retry first checks whether the auth page alread
   );
 });
 
+test('step 4 background recovery polls for about-you or welcome-create before waiting for the content-script code-fill response to time out', () => {
+  const backgroundSource = readProjectFile('background.js');
+
+  assert.match(
+    backgroundSource,
+    /async function waitForStep4VerificationAdvanceSignal\(step,\s*options = \{\}\) \{[\s\S]*timeoutMs\s*=\s*15000[\s\S]*intervalMs\s*=\s*1000/i
+  );
+  assert.match(
+    backgroundSource,
+    /hasReadyProfilePage[\s\S]*hasVisibleProfileFormInput[\s\S]*isCanonicalAboutYouUrl\(pageState\?\.url\)[\s\S]*isStableStep5SuccessUrl\(pageState\?\.url\)/i
+  );
+  assert.match(
+    backgroundSource,
+    /检测到验证码提交流程后页面已进入资料页\/创建成功页，提前按第 4 步成功处理/i
+  );
+  assert.match(
+    backgroundSource,
+    /const step4AdvanceSignalPromise = step === 4[\s\S]*waitForStep4VerificationAdvanceSignal\(step(?:,\s*\{)?/i
+  );
+  assert.match(
+    backgroundSource,
+    /const step4RecoveryRacers = \[submitResponsePromise\][\s\S]*step4RecoveryRacers\.push\(step4AdvanceSignalPromise\)[\s\S]*Promise\.race\(step4RecoveryRacers\)/i
+  );
+});
+
+test('step 4 starts a direct same-page fill recovery when the verification code is already available but the signup page stays silent for a few seconds', () => {
+  const backgroundSource = readProjectFile('background.js');
+
+  assert.match(
+    backgroundSource,
+    /async function waitForStep4SlowCodeFillRecovery\(step,\s*code,\s*options = \{\}\) \{[\s\S]*delayMs\s*=\s*4000/i
+  );
+  assert.match(
+    backgroundSource,
+    /hasReadyVerificationPage[\s\S]*hasVisibleVerificationInput[\s\S]*isCanonicalEmailVerificationUrl\(pageState\?\.url\)/i
+  );
+  assert.match(
+    backgroundSource,
+    /验证码已拿到，但 auth 验证页暂时没有开始响应，先直接在当前页补填一次验证码/i
+  );
+  assert.match(
+    backgroundSource,
+    /const step4SlowFillRecoveryPromise = step === 4[\s\S]*waitForStep4SlowCodeFillRecovery\(step,\s*code/i
+  );
+  assert.match(
+    backgroundSource,
+    /step4RecoveryRacers\.push\(step4SlowFillRecoveryPromise\)/i
+  );
+  assert.match(
+    backgroundSource,
+    /finalSubmitRaceResult\?\.kind === 'step4-slow-fill-recovery'[\s\S]*result\?\.accepted \|\| finalSubmitRaceResult\?\.result\?\.retryInbox/i
+  );
+});
+
 test('step 3 retries once with the current email and password when the signup credential page stalls', () => {
   const runtimeErrorsSource = readProjectFile(path.join('shared', 'runtime-errors.js'));
 
@@ -470,6 +524,32 @@ test('step 6 ignores localhost redirect-driven signup page disconnects and keeps
   assert.match(
     backgroundSource,
     /async function executeStep6\(state\) \{[\s\S]*try \{[\s\S]*await sendToContentScript\('signup-page', \{[\s\S]*step:\s*6[\s\S]*\}\);[\s\S]*\} catch \(err\) \{[\s\S]*isMessageChannelClosedError\([\s\S]*isReceivingEndMissingError\([\s\S]*waitForStep6CompletionSignalOrRecoveredAuthState\(\);[\s\S]*throw err;[\s\S]*\}[\s\S]*\}/i
+  );
+});
+
+test('step 6 refreshes the VPS OAuth link through a dedicated fetch path instead of reusing step 1 completion state', () => {
+  const backgroundSource = readProjectFile('background.js');
+  const vpsSource = readProjectFile(path.join('content', 'vps-panel.js'));
+
+  assert.match(
+    backgroundSource,
+    /async function fetchFreshOauthUrlFromVps\(state,\s*options = \{\}\) \{[\s\S]*sendToContentScript\('vps-panel',\s*\{[\s\S]*type:\s*'FETCH_OAUTH_URL'[\s\S]*payload:\s*\{\s*logStep\s*\}/i
+  );
+  assert.doesNotMatch(
+    backgroundSource,
+    /async function fetchFreshOauthUrlFromVps\(state,\s*options = \{\}\) \{[\s\S]*waitForStepComplete\(1/i
+  );
+  assert.match(
+    backgroundSource,
+    /async function executeStep6\(state\) \{[\s\S]*await reuseOrCreateTab\('signup-page',\s*effectiveState\.oauthUrl,\s*\{[\s\S]*reuseActiveTabOnCreate:\s*true[\s\S]*reloadIfSameUrl:\s*true/i
+  );
+  assert.match(
+    vpsSource,
+    /if \(message\.type === 'EXECUTE_STEP' \|\| message\.type === 'FETCH_OAUTH_URL'\)/i
+  );
+  assert.match(
+    vpsSource,
+    /case 'FETCH_OAUTH_URL':[\s\S]*return await fetchOAuthUrlFromPanel\(/i
   );
 });
 
